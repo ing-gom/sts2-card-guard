@@ -1,0 +1,11 @@
+{
+  "id": "Sts2CardGuard",
+  "name": "StS2 Card Guard",
+  "author": "inggom",
+  "description": "카드 보상·상점·이벤트·전투 중 카드 생성에서 등장할 카드팩을 캐릭터별로 제어합니다. 다른 캐릭터 카드/다른 모드 카드가 섞여 나오는 것을 막을 수 있습니다. 캐릭터 선택 화면의 'Card Pack Filter' 버튼으로 패널을 열어, 캐릭터별로 허용할 캐릭터/모드 카드팩을 체크합니다(기본: 전부 허용, 체크 해제 시 차단). 콘솔 커맨드 cardguard 로 현재 등장 가능한 카드를 확인. 영어/한국어 지원.",
+  "version": "v0.1.0",
+  "has_pck": false,
+  "has_dll": true,
+  "dependencies": [],
+  "affects_gameplay": true
+}
