@@ -259,12 +259,37 @@ internal static class CardGuardService
 
         if (kept.Count == 0)
         {
-            Log.Warn($"filter would empty pool (char={currentPool.Title}, {materialized.Count} candidates all disallowed) — passing through unfiltered");
+            // Every candidate is blocked (e.g. a relic like Kaleidoscope offering a reward drawn
+            // ENTIRELY from another, blocked character). Rather than pass the foreign cards
+            // through, substitute the current character's own allowed cards so the block holds
+            // without emptying the pool (which would crash the RNG).
+            var sub = TryBuildOwnPoolSubstitute(player, currentPool);
+            if (sub.Count > 0)
+            {
+                Log.Info($"all {materialized.Count} candidates blocked (char={currentPool.Title}); substituted {sub.Count} own-character card(s)");
+                return sub;
+            }
+            Log.Warn($"filter would empty pool (char={currentPool.Title}) and no substitute available — passing through unfiltered");
             return materialized;
         }
 
         Log.FilterHit(currentPool.Title, removed, kept.Count);
         return kept;
+    }
+
+    /// <summary>The current character's own unlocked, still-allowed cards — used to replace a
+    /// fully-blocked candidate pool without emptying it.</summary>
+    private static List<CardModel> TryBuildOwnPoolSubstitute(Player? player, CardPoolModel currentPool)
+    {
+        var result = new List<CardModel>();
+        if (player == null) return result;
+        try
+        {
+            foreach (var c in currentPool.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint))
+                if (c != null && IsAllowed(c, currentPool)) result.Add(c);
+        }
+        catch { }
+        return result;
     }
 
     /// <summary>Whether <paramref name="card"/> would pass the filter for <paramref name="player"/>'s character (no empty-safety). For diagnostics/console.</summary>
