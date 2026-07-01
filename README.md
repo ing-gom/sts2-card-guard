@@ -44,7 +44,7 @@ panel (no ModConfig dependency):
 character. Custom characters appear only in the character section (one checkbox controls them).
 
 Settings persist to `Settings/card_guard_config.txt` (JSON) next to the mod DLL and apply from the
-first screen on the next launch. English and Korean are supported (follows the game language).
+first screen on the next launch. English, Korean and Simplified Chinese are supported (follows the game language).
 
 ## Debug console
 

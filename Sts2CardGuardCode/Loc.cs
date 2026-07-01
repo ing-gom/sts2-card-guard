@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Godot;
 using MegaCrit.Sts2.Core.Localization;
 
 namespace Sts2CardGuard;
@@ -10,7 +11,7 @@ namespace Sts2CardGuard;
 /// <c>LocManager_SetLanguage_Patch</c>). Text is read back through <see cref="LocString"/>; if the
 /// table isn't available the in-code dictionary is used, so display is always robust.
 ///
-/// English + Korean are provided; any other game language falls back to English.
+/// English, Korean and Simplified Chinese are provided; any other game language falls back to English.
 /// </summary>
 internal static class Loc
 {
@@ -49,17 +50,47 @@ internal static class Loc
         ["mod_colorless_fmt"] = "  (무색 {0}장)",
     };
 
-    private static bool IsKorean()
+    private static readonly Dictionary<string, string> Zh = new()
     {
-        try
+        ["button"] = "卡包过滤器",
+        ["title"] = "卡包过滤器",
+        ["enable"] = "启用",
+        ["colorless"] = "允许无色卡",
+        ["hint"] = "默认：允许所有卡包。在左侧选择角色，然后在右侧取消勾选某个卡包即可为该角色屏蔽。",
+        ["configure"] = "选择角色",
+        ["sec_char"] = "角色卡包",
+        ["sec_mod"] = "模组卡包",
+        ["own_suffix"] = "  (自身 — 始终启用)",
+        ["cards"] = "张",
+        ["no_mods"] = "(无非角色加牌模组)",
+        ["mod_colorless_fmt"] = "  (无色 {0} 张)",
+    };
+
+    private static readonly Dictionary<string, Dictionary<string, string>> Langs = new()
+    {
+        ["en"] = En,
+        ["ko"] = Ko,
+        ["zh"] = Zh,
+    };
+
+    /// <summary>Resolve the game language to "en" / "ko" / "zh" (Simplified). Others -> "en".</summary>
+    private static string LangKey()
+    {
+        string code = "";
+        try { code = (LocManager.Instance?.Language ?? "").ToLowerInvariant(); } catch { }
+        if (string.IsNullOrEmpty(code))
         {
-            var l = LocManager.Instance?.Language;
-            return l != null && l.StartsWith("ko", StringComparison.OrdinalIgnoreCase);
+            try { code = (TranslationServer.GetLocale() ?? "").ToLowerInvariant(); } catch { }
         }
-        catch { return false; }
+        if (code.StartsWith("ko", StringComparison.Ordinal)) return "ko";
+        // Traditional Chinese has no dictionary here -> fall back to English.
+        if (code.Contains("hant") || code.Contains("tchinese") || code.Contains("tw")) return "en";
+        if (code.Contains("hans") || code.Contains("schinese") || code.StartsWith("zh", StringComparison.Ordinal) || code.Contains("chinese"))
+            return "zh";
+        return "en";
     }
 
-    private static Dictionary<string, string> Dict() => IsKorean() ? Ko : En;
+    private static Dictionary<string, string> Dict() => Langs.TryGetValue(LangKey(), out var d) ? d : En;
 
     /// <summary>Merge the current-language strings into the game loc table. Safe to call repeatedly.</summary>
     public static void Apply(LocManager? mgr)
