@@ -158,15 +158,6 @@ public static class CardGuardPanel
         header.AddChild(x);
         vbox.AddChild(header);
 
-        // Master toggles row.
-        var toggles = new HBoxContainer();
-        toggles.AddThemeConstantOverride("separation", 24);
-        toggles.AddChild(MakeToggle(Loc.T("enable"), () => CardGuardService.Enabled,
-            v => CardGuardService.Enabled = v));
-        toggles.AddChild(MakeToggle(Loc.T("colorless"), () => CardGuardService.AllowColorless,
-            v => CardGuardService.AllowColorless = v));
-        vbox.AddChild(toggles);
-
         var hint = new Label
         {
             Text = Loc.T("hint"),
@@ -309,15 +300,6 @@ public static class CardGuardPanel
         l.AddThemeFontSizeOverride("font_size", 15);
         l.AddThemeColorOverride("font_color", GOLD);
         return l;
-    }
-
-    private static CheckBox MakeToggle(string text, Func<bool> get, Action<bool> set)
-    {
-        var cb = new CheckBox { Text = text };
-        cb.SetPressedNoSignal(get());
-        cb.AddThemeFontSizeOverride("font_size", 16);
-        cb.Toggled += v => { set(v); CardGuardConfig.Save(); };
-        return cb;
     }
 
     private static CheckBox MakeCheck(string text, bool initial, Action<bool> onChanged)

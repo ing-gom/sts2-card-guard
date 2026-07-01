@@ -32,7 +32,6 @@ is untouched. The current character is read from `player.Character.CardPool` —
 The character-select screen gets a **Card Pack Filter** button (bottom-right). It opens a full-screen
 panel (no ModConfig dependency):
 
-- **Top toggles** — *Enable*, *Allow colorless*.
 - **Left** — pick the character you are configuring for (base **and** custom characters).
 - **Right** — the card packs for that character, each with a card count:
   - **Character card packs** — the selected character's own pack (always on) + every other character

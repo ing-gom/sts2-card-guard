@@ -27,9 +27,6 @@ internal static class CardGuardService
     /// <summary>The five base-character pool titles — fallback + config default seeding.</summary>
     public static readonly string[] CharacterTitles = { "ironclad", "silent", "defect", "regent", "necrobinder" };
 
-    public static volatile bool Enabled = true;
-    public static volatile bool AllowColorless = true;
-
     /// <summary>Per-character BLOCKED other-character titles. Empty by default = all allowed.</summary>
     private static readonly Dictionary<string, HashSet<string>> CrossBlock = new(StringComparer.OrdinalIgnoreCase);
 
@@ -236,7 +233,7 @@ internal static class CardGuardService
     /// </summary>
     public static IEnumerable<CardModel> Filter(IEnumerable<CardModel> cards, Player? player)
     {
-        if (cards == null || !Enabled) return cards!;
+        if (cards == null) return cards!;
 
         var currentPool = TryGetCurrentPool(player);
         if (currentPool == null) return cards;
@@ -295,7 +292,6 @@ internal static class CardGuardService
     /// <summary>Whether <paramref name="card"/> would pass the filter for <paramref name="player"/>'s character (no empty-safety). For diagnostics/console.</summary>
     public static bool WouldAppear(CardModel card, Player? player)
     {
-        if (!Enabled) return true;
         var pool = TryGetCurrentPool(player);
         if (pool == null) return true;
         try { return IsAllowed(card, pool); }
@@ -321,21 +317,13 @@ internal static class CardGuardService
         bool isOwn = ReferenceEquals(pool, currentPool)
                      || string.Equals(title, currentTitle, StringComparison.OrdinalIgnoreCase);
 
-        // Pool-level checks only apply to OTHER pools (own base cards are always kept).
-        if (!isOwn)
+        // Colorless is always allowed (mod-added colorless is still gated by the mod pack below).
+        // Other non-own pools are gated by the character pack, matched by title — base OR custom
+        // character. System pools (curse/status/token/event/quest) default to allowed because the
+        // UI never blocks them.
+        if (!isOwn && !pool.IsColorless)
         {
-            if (pool.IsColorless)
-            {
-                if (!AllowColorless) return false;
-            }
-            else
-            {
-                // Any other pool, matched by TITLE — base OR custom character. This is what the
-                // "character card pack" checkboxes drive, so custom characters (which also show up
-                // as a mod pack) are honored here too. System pools (curse/status/token/event/quest)
-                // default to allowed because the UI never blocks them.
-                if (!GetCrossAllowed(currentTitle, title)) return false;
-            }
+            if (!GetCrossAllowed(currentTitle, title)) return false;
         }
 
         // Mod-pack block applies regardless of own/other, so blocking a mod removes ITS cards

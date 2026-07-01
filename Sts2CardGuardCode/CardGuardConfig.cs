@@ -19,8 +19,6 @@ internal static class CardGuardConfig
 {
     private sealed class Model
     {
-        [JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
-        [JsonPropertyName("allowColorless")] public bool AllowColorless { get; set; } = true;
         [JsonPropertyName("crossBlock")] public Dictionary<string, List<string>> CrossBlock { get; set; } = new();
         [JsonPropertyName("modBlock")] public Dictionary<string, List<string>> ModBlock { get; set; } = new();
     }
@@ -46,8 +44,6 @@ internal static class CardGuardConfig
             if (!File.Exists(path)) { Log.Info("no saved config; all card packs allowed by default."); return; }
 
             var model = JsonSerializer.Deserialize<Model>(File.ReadAllText(path)) ?? new Model();
-            CardGuardService.Enabled = model.Enabled;
-            CardGuardService.AllowColorless = model.AllowColorless;
 
             foreach (var (from, tos) in model.CrossBlock)
                 foreach (var to in tos)
@@ -70,11 +66,7 @@ internal static class CardGuardConfig
     {
         try
         {
-            var model = new Model
-            {
-                Enabled = CardGuardService.Enabled,
-                AllowColorless = CardGuardService.AllowColorless,
-            };
+            var model = new Model();
             foreach (var from in CardGuardService.GetConfiguredTitles())
             {
                 var chars = CardGuardService.GetBlockedCharacters(from);
