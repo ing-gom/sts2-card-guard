@@ -51,6 +51,21 @@ Open the dev console (backtick) and run **`cardguard`** for a report of how many
 can appear for the current character under your settings — e.g. `silent: 0/86 can appear` after you
 block Silent. Locked-by-progression cards are shown as `(N locked)`.
 
+## Multiplayer (co-op)
+
+STS2 co-op is host-authoritative lockstep: every peer re-computes card generation from the host's
+shared RNG, and a peer whose result diverges is kicked back to the menu. Since Card Guard filters
+the candidate pool *before* the pick, two players with different settings would filter differently
+and desync. To prevent this, **in a networked run every player automatically uses the host's Card
+Guard settings** (each client's own settings are ignored for that run) — so all peers filter
+identically and stay in sync. The host's config is exchanged in the lobby before the run starts.
+
+- **Both players must have the mod** (matching version). If a peer lacks it, or the host's config
+  can't be confirmed, Card Guard **turns filtering off for that run** rather than risk a desync — it
+  never causes a disconnect, it just does nothing that run.
+- Your saved settings are untouched; the host-follow behavior only applies inside a co-op run.
+- Singleplayer is unaffected (uses your own settings as before).
+
 ## Scope / limitations
 
 - **System cards** (curse/status/token/event/quest — Wound, Burn, etc.) are never blocked.

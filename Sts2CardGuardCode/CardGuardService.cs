@@ -35,6 +35,17 @@ internal static class CardGuardService
 
     private static readonly object _lock = new();
 
+    // ---- Multiplayer effective-config override (see Multiplayer/MultiplayerSync) ----
+    // In host-authoritative lockstep co-op every peer must filter identically, so a networked run
+    // ignores each machine's local config and uses the HOST's. These flags are set ONCE at run
+    // start (never flipped mid-run) so there is no in-run race:
+    //   _mpPassThrough : filtering disabled for this run (safety fallback — mod does nothing).
+    //   _mpUseOverride : read block-sets from the host-supplied override instead of local (clients).
+    private static volatile bool _mpPassThrough;
+    private static volatile bool _mpUseOverride;
+    private static readonly Dictionary<string, HashSet<string>> _ovrCrossBlock = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, HashSet<string>> _ovrModBlock = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Assembly that owns all base-game card models (sts2.dll).</summary>
     private static readonly System.Reflection.Assembly BaseGameAssembly = typeof(CardModel).Assembly;
 
@@ -42,7 +53,11 @@ internal static class CardGuardService
 
     public static bool GetCrossAllowed(string fromTitle, string toTitle)
     {
-        lock (_lock) { return !(CrossBlock.TryGetValue(fromTitle, out var s) && s.Contains(toTitle)); }
+        lock (_lock)
+        {
+            var d = _mpUseOverride ? _ovrCrossBlock : CrossBlock;
+            return !(d.TryGetValue(fromTitle, out var s) && s.Contains(toTitle));
+        }
     }
 
     public static void SetCrossAllowed(string fromTitle, string toTitle, bool allowed)
@@ -59,7 +74,11 @@ internal static class CardGuardService
 
     public static bool GetModAllowed(string characterTitle, string modName)
     {
-        lock (_lock) { return !(ModBlock.TryGetValue(characterTitle, out var s) && s.Contains(modName)); }
+        lock (_lock)
+        {
+            var d = _mpUseOverride ? _ovrModBlock : ModBlock;
+            return !(d.TryGetValue(characterTitle, out var s) && s.Contains(modName));
+        }
     }
 
     public static void SetModAllowed(string characterTitle, string modName, bool allowed)
@@ -98,6 +117,59 @@ internal static class CardGuardService
             d[key] = s;
         }
         return s;
+    }
+
+    // ---- Multiplayer control (called only from MultiplayerSync, once per run at lock-in) ----
+
+    /// <summary>A copy of the LOCAL blocked-pack config (never the override) — what the host sends to peers.</summary>
+    public static (Dictionary<string, List<string>> cross, Dictionary<string, List<string>> mod) SnapshotLocalBlocks()
+    {
+        var cross = new Dictionary<string, List<string>>(OIC);
+        var mod = new Dictionary<string, List<string>>(OIC);
+        lock (_lock)
+        {
+            foreach (var (k, s) in CrossBlock) if (s.Count > 0) cross[k] = s.ToList();
+            foreach (var (k, s) in ModBlock) if (s.Count > 0) mod[k] = s.ToList();
+        }
+        return (cross, mod);
+    }
+
+    /// <summary>Host of a networked run: filter with our own (local) config.</summary>
+    public static void ActivateMpLocal()
+    {
+        lock (_lock) { _mpUseOverride = false; _mpPassThrough = false; }
+    }
+
+    /// <summary>Client of a networked run: filter with the HOST's config, ignoring our own.</summary>
+    public static void ActivateMpOverride(Dictionary<string, List<string>> cross, Dictionary<string, List<string>> mod)
+    {
+        lock (_lock)
+        {
+            _ovrCrossBlock.Clear();
+            _ovrModBlock.Clear();
+            foreach (var (k, v) in cross) _ovrCrossBlock[k] = new HashSet<string>(v, StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in mod) _ovrModBlock[k] = new HashSet<string>(v, StringComparer.OrdinalIgnoreCase);
+            _mpUseOverride = true;
+            _mpPassThrough = false;
+        }
+    }
+
+    /// <summary>Networked run where consistency can't be guaranteed: disable filtering entirely (safe, no desync).</summary>
+    public static void DisableMpFiltering()
+    {
+        lock (_lock) { _mpPassThrough = true; _mpUseOverride = false; }
+    }
+
+    /// <summary>Back to normal singleplayer behavior (local config, filtering on).</summary>
+    public static void ClearMpState()
+    {
+        lock (_lock)
+        {
+            _mpPassThrough = false;
+            _mpUseOverride = false;
+            _ovrCrossBlock.Clear();
+            _ovrModBlock.Clear();
+        }
     }
 
     // ---- Dynamic discovery: characters (base + mod) ----
@@ -234,6 +306,9 @@ internal static class CardGuardService
     public static IEnumerable<CardModel> Filter(IEnumerable<CardModel> cards, Player? player)
     {
         if (cards == null) return cards!;
+
+        // Networked run where filtering is disabled for consistency — do nothing (never desync).
+        if (_mpPassThrough) return cards;
 
         var currentPool = TryGetCurrentPool(player);
         if (currentPool == null) return cards;
