@@ -22,10 +22,19 @@ pool** that every card source draws from, before the RNG picks:
 | Card rewards + events/treasures | `CardCreationOptions.GetPossibleCards` |
 | In-combat generation ("add a random card") | `CardFactory.GetForCombat` / `GetDistinctForCombat` |
 | Shop | `CardFactory.CreateForMerchant` |
+| Cross-character event choices (Colorful Philosophers) | `ColorfulPhilosophers.GenerateInitialOptions` |
 
 The filter is **subtractive** and never empties a pool (if every candidate would be removed, the
 original set is passed through), so it can't crash reward/combat RNG. The card library / compendium
 is untouched. The current character is read from `player.Character.CardPool` — no guessing.
+
+**Cross-character sources.** Relics and events that deliberately hand you *another* character's cards
+— **Kaleidoscope**, **Prismatic Gem**, **Splash**, and the **Colorful Philosophers** event — all
+draw their cards through the pool hooks above, so a blocked character's cards are filtered there too.
+When a fully-blocked pool would be emptied, an *allowed other* character's cards are substituted
+first (falling back to your own only if no other is allowed), so the Kaleidoscope no longer surfaces
+your own class. The Colorful Philosophers event also has its **choice list** filtered directly, so a
+blocked character never even appears as an option.
 
 ## In-game panel
 

@@ -20,9 +20,17 @@ Slay the Spire 2 런에 **등장할 카드팩을 캐릭터별로 제어**합니�
 | 카드 보상 + 이벤트/보물 | `CardCreationOptions.GetPossibleCards` |
 | 전투 중 생성("랜덤 카드 추가") | `CardFactory.GetForCombat` / `GetDistinctForCombat` |
 | 상점 | `CardFactory.CreateForMerchant` |
+| 크로스-캐릭터 이벤트 선택지(다채로운 철학자들) | `ColorfulPhilosophers.GenerateInitialOptions` |
 
 필터는 **제거만** 하며 풀을 절대 비우지 않아(전부 제거될 상황이면 원본 통과) 보상/전투 RNG를 깨지
 않습니다. 카드 도감은 영향받지 않습니다. 현재 캐릭터는 `player.Character.CardPool`로 정확히 판정.
+
+**크로스-캐릭터 소스.** *다른* 캐릭터 카드를 일부러 주는 렐릭/이벤트 — **만화경(Kaleidoscope)**,
+**프리즘 젬(Prismatic Gem)**, **스플래시(Splash)**, **다채로운 철학자들(Colorful Philosophers)**
+이벤트 — 는 모두 위 풀 훅을 거치므로 차단된 캐릭터 카드가 여기서도 걸러집니다. 풀이 전부 차단되어
+비게 될 때는 **허용된 다른 캐릭터** 카드를 우선 대체하고(허용된 다른 캐릭터가 없을 때만 자기 카드로
+폴백), 그 결과 만화경이 더 이상 본인 클래스 카드를 내놓지 않습니다. 다채로운 철학자들 이벤트는
+**선택지 목록** 자체도 필터링해, 차단된 캐릭터는 아예 선택지로 나타나지 않습니다.
 
 ## 인게임 패널
 

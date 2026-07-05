@@ -331,14 +331,14 @@ internal static class CardGuardService
 
         if (kept.Count == 0)
         {
-            // Every candidate is blocked (e.g. a relic like Kaleidoscope offering a reward drawn
-            // ENTIRELY from another, blocked character). Rather than pass the foreign cards
-            // through, substitute the current character's own allowed cards so the block holds
-            // without emptying the pool (which would crash the RNG).
-            var sub = TryBuildOwnPoolSubstitute(player, currentPool);
+            // Every candidate is blocked (e.g. a relic like Kaleidoscope / Prismatic Gem, or the
+            // Colorful Philosophers event, offering a reward drawn ENTIRELY from another, blocked
+            // character). Rather than pass the foreign cards through, substitute allowed cards so
+            // the block holds without emptying the pool (which would crash the RNG).
+            var sub = TryBuildSubstitute(player, currentPool);
             if (sub.Count > 0)
             {
-                Log.Info($"all {materialized.Count} candidates blocked (char={currentPool.Title}); substituted {sub.Count} own-character card(s)");
+                Log.Info($"all {materialized.Count} candidates blocked (char={currentPool.Title}); substituted {sub.Count} allowed card(s)");
                 return sub;
             }
             Log.Warn($"filter would empty pool (char={currentPool.Title}) and no substitute available — passing through unfiltered");
@@ -349,19 +349,60 @@ internal static class CardGuardService
         return kept;
     }
 
-    /// <summary>The current character's own unlocked, still-allowed cards — used to replace a
-    /// fully-blocked candidate pool without emptying it.</summary>
-    private static List<CardModel> TryBuildOwnPoolSubstitute(Player? player, CardPoolModel currentPool)
+    /// <summary>
+    /// Replacement candidates when every offered card was blocked. Cross-character sources
+    /// (Kaleidoscope, Prismatic Gem, Colorful Philosophers) intentionally offer OTHER characters'
+    /// cards; when the picked character is blocked we prefer substituting cards from another
+    /// ALLOWED character over falling back to the player's own pool — otherwise the Kaleidoscope
+    /// ends up showing the player's own class, which reads as a bug ("万花筒出现本职业角色"). Only
+    /// if no other character is allowed do we use the current character's own cards, so the pool
+    /// is never emptied (which would crash the RNG). Deterministic (fixed pool + card order) so
+    /// networked peers substitute identically.
+    /// </summary>
+    private static List<CardModel> TryBuildSubstitute(Player? player, CardPoolModel currentPool)
     {
         var result = new List<CardModel>();
         if (player == null) return result;
+        string currentTitle = currentPool.Title ?? string.Empty;
         try
         {
+            // 1) Allowed OTHER-character cards first (keep the cross-character flavor).
+            foreach (var pool in player.UnlockState.CharacterCardPools)
+            {
+                if (pool == null || pool.IsColorless) continue;
+                string t = pool.Title ?? string.Empty;
+                if (t.Equals(currentTitle, StringComparison.OrdinalIgnoreCase)) continue; // own handled below
+                if (!GetCrossAllowed(currentTitle, t)) continue;                          // blocked character
+                foreach (var c in pool.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint))
+                    if (c != null && IsAllowed(c, currentPool)) result.Add(c);
+            }
+            if (result.Count > 0) return result;
+
+            // 2) Fall back to the current character's own cards (never empty the pool).
             foreach (var c in currentPool.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint))
                 if (c != null && IsAllowed(c, currentPool)) result.Add(c);
         }
         catch { }
         return result;
+    }
+
+    /// <summary>
+    /// Whether an event/relic option targeting the character pool <paramref name="targetTitle"/>
+    /// should be hidden for <paramref name="player"/>'s current character. Used by non-card-pool
+    /// surfaces (e.g. the Colorful Philosophers event's character-choice options) that pick a
+    /// foreign character BEFORE any card is created and so bypass the <see cref="Filter"/> hook.
+    /// Respects the multiplayer pass-through (never hide when filtering is disabled for the run)
+    /// and the host override, so it stays consistent with card filtering across peers.
+    /// </summary>
+    public static bool IsCrossCharacterBlocked(Player? player, string targetTitle)
+    {
+        if (_mpPassThrough) return false;
+        if (string.IsNullOrEmpty(targetTitle)) return false;
+        var pool = TryGetCurrentPool(player);
+        if (pool == null) return false;
+        string currentTitle = pool.Title ?? string.Empty;
+        if (targetTitle.Equals(currentTitle, StringComparison.OrdinalIgnoreCase)) return false; // own is never blocked
+        return !GetCrossAllowed(currentTitle, targetTitle);
     }
 
     /// <summary>Whether <paramref name="card"/> would pass the filter for <paramref name="player"/>'s character (no empty-safety). For diagnostics/console.</summary>
