@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using Godot;
+using MegaCrit.Sts2.Core.Nodes.Screens.CharacterSelect;
 
 namespace Sts2CardGuard.Ui;
 
@@ -30,6 +32,9 @@ public static class CardGuardPanel
     private static VBoxContainer? _leftList;
     private static string _selected = CardGuardService.CharacterTitles[0];
 
+    /// <summary>The character-select screen this panel is attached to (for reading the current selection).</summary>
+    private static Node? _screen;
+
     // ── Character-select screen button ──────────────────────
     public static void Attach(Node screen) =>
         Callable.From(() => DoAttach(screen)).CallDeferred();
@@ -39,6 +44,7 @@ public static class CardGuardPanel
         try
         {
             if (screen == null || !GodotObject.IsInstanceValid(screen)) return;
+            _screen = screen;
             if (FindDescendantByName(screen, ButtonName) != null) return; // already attached
 
             var host = screen as Control;
@@ -111,9 +117,35 @@ public static class CardGuardPanel
     private static void ShowPanel()
     {
         if (_root == null || !GodotObject.IsInstanceValid(_root)) return;
+        SyncSelectedToScreen();
         _root.Visible = true;
         RebuildLeft();
         RebuildRight();
+    }
+
+    /// <summary>
+    /// Default the "configure FOR" character to whichever character is currently highlighted on the
+    /// character-select screen, so opening the panel lands on the class you're about to play. Falls
+    /// back to the last selection if the screen's pick can't be resolved (e.g. the Random button).
+    /// </summary>
+    private static void SyncSelectedToScreen()
+    {
+        try
+        {
+            if (_screen == null || !GodotObject.IsInstanceValid(_screen)) return;
+            var f = _screen.GetType().GetField("_selectedButton", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (f?.GetValue(_screen) is not NCharacterSelectButton btn || !GodotObject.IsInstanceValid(btn)) return;
+            if (btn.IsRandom) return; // Random has no fixed pool to configure — keep prior selection
+            string? title = btn.Character?.CardPool?.Title;
+            if (string.IsNullOrEmpty(title)) return;
+            // Only adopt it if it's a character the panel actually lists (a real colored pool).
+            foreach (var ci in CardGuardService.GetAllCharacters())
+                if (string.Equals(ci.Title, title, StringComparison.OrdinalIgnoreCase)) { _selected = ci.Title; return; }
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[{MainFile.ModId}] sync selected character failed: {ex.Message}");
+        }
     }
 
     private static void Hide()

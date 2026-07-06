@@ -179,12 +179,17 @@ internal static class CardGuardService
     private static List<CharInfo>? _allChars;
     private static HashSet<string>? _characterModNames;
 
+    /// <summary>Character-mod name → the pool titles of the character(s) it adds. Lets us tie a
+    /// character mod's SHARED cards (colorless/curse/status) to its character block.</summary>
+    private static Dictionary<string, HashSet<string>>? _modCharTitles;
+
     /// <summary>All selectable characters (base + mod-added): card-pool title, display name, card count.</summary>
     public static IReadOnlyList<CharInfo> GetAllCharacters()
     {
         if (_allChars != null) return _allChars;
         var list = new List<CharInfo>();
         var modNames = new HashSet<string>(OIC);
+        var modCharTitles = new Dictionary<string, HashSet<string>>(OIC);
         var seen = new HashSet<string>(OIC);
         try
         {
@@ -211,7 +216,13 @@ internal static class CardGuardService
                     if (asm != BaseGameAssembly)
                     {
                         var nm = asm.GetName().Name;
-                        if (!string.IsNullOrEmpty(nm)) modNames.Add(nm);
+                        if (!string.IsNullOrEmpty(nm))
+                        {
+                            modNames.Add(nm);
+                            if (!modCharTitles.TryGetValue(nm, out var ts))
+                            { ts = new HashSet<string>(OIC); modCharTitles[nm] = ts; }
+                            ts.Add(title);
+                        }
                     }
                 }
                 catch { }
@@ -223,6 +234,7 @@ internal static class CardGuardService
             foreach (var t in CharacterTitles) list.Add(new CharInfo(t, Capitalize(t), 0));
 
         _characterModNames = modNames;
+        _modCharTitles = modCharTitles;
         _allChars = list;
         return _allChars;
     }
@@ -233,6 +245,23 @@ internal static class CardGuardService
         if (string.IsNullOrEmpty(modName)) return false;
         if (_characterModNames == null) GetAllCharacters();
         return _characterModNames != null && _characterModNames.Contains(modName);
+    }
+
+    /// <summary>
+    /// True when <paramref name="modName"/> adds at least one character and EVERY character it adds
+    /// is cross-blocked for <paramref name="currentTitle"/>. Used to drop a character mod's SHARED
+    /// cards (colorless / curse / status) once its whole roster is blocked — those cards live in
+    /// pools the character UI never lists, so blocking the character alone would otherwise leave
+    /// them showing up. Never true for your own class (your own character is never cross-blocked).
+    /// </summary>
+    private static bool AreAllModCharactersBlocked(string currentTitle, string modName)
+    {
+        if (_modCharTitles == null) GetAllCharacters();
+        if (_modCharTitles == null || !_modCharTitles.TryGetValue(modName, out var titles) || titles.Count == 0)
+            return false;
+        foreach (var t in titles)
+            if (GetCrossAllowed(currentTitle, t)) return false; // some character of this mod still allowed
+        return true;
     }
 
     private static string ResolveCharDisplay(CharacterModel ch, string fallbackTitle)
@@ -447,9 +476,20 @@ internal static class CardGuardService
         if (IsModCard(card))
         {
             string mn = GetModName(card);
-            // Custom-character cards are controlled by the character checkbox above (by pool title),
-            // not by a separate mod pack — so don't re-block them here.
-            if (!IsCharacterMod(mn) && !GetModAllowed(currentTitle, mn)) return false;
+            if (IsCharacterMod(mn))
+            {
+                // A character mod's COLORED pool is already gated above by pool title. But its
+                // SHARED cards — colorless, curses, statuses — sit in pools the character UI never
+                // lists, so both gates above pass them through. Tie them to the character block:
+                // once every character this mod adds is blocked for the current character, drop its
+                // shared cards too. (Never affects your own class — own is never cross-blocked.)
+                if (AreAllModCharactersBlocked(currentTitle, mn)) return false;
+            }
+            else if (!GetModAllowed(currentTitle, mn))
+            {
+                // Standalone card-pack mod (no character) — gated by its mod-pack checkbox.
+                return false;
+            }
         }
 
         return true;
