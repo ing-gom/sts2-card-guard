@@ -206,12 +206,25 @@ public static class CardGuardPanel
         body.AddThemeConstantOverride("separation", 16);
         vbox.AddChild(body);
 
-        _leftList = new VBoxContainer { CustomMinimumSize = new Vector2(240, 0) };
+        // The character column scrolls: with enough character mods installed the list is taller than
+        // the panel, and an unscrolled VBox reports that height as its minimum size — which makes the
+        // whole panel grow past the bottom of the screen and swallow its own controls.
+        var leftCol = new VBoxContainer { CustomMinimumSize = new Vector2(240, 0) };
         var leftLbl = new Label { Text = Loc.T("configure") };
         leftLbl.AddThemeFontSizeOverride("font_size", 16);
         leftLbl.AddThemeColorOverride("font_color", GRAY);
-        _leftList.AddChild(leftLbl);
-        body.AddChild(_leftList);
+        leftCol.AddChild(leftLbl);
+
+        var leftScroll = new ScrollContainer
+        {
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+        };
+        _leftList = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        leftScroll.AddChild(_leftList);
+        leftCol.AddChild(leftScroll);
+        body.AddChild(leftCol);
 
         body.AddChild(new VSeparator());
 
@@ -231,8 +244,7 @@ public static class CardGuardPanel
     private static void RebuildLeft()
     {
         if (_leftList == null) return;
-        // Keep the header (index 0), drop the rest.
-        for (int i = _leftList.GetChildCount() - 1; i >= 1; i--)
+        for (int i = _leftList.GetChildCount() - 1; i >= 0; i--)
             _leftList.GetChild(i).QueueFree();
 
         foreach (var ci in CardGuardService.GetAllCharacters())
