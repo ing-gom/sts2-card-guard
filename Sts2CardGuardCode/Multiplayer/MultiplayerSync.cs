@@ -37,6 +37,7 @@ internal static class MultiplayerSync
     private static bool _hostConfigReceived;
     private static Dictionary<string, List<string>>? _hostCross;
     private static Dictionary<string, List<string>>? _hostMod;
+    private static Dictionary<string, List<string>>? _hostRelicMod;
 
     /// <summary>
     /// Called when a <see cref="StartRunLobby"/> is constructed (host or client). Resets per-lobby
@@ -55,6 +56,7 @@ internal static class MultiplayerSync
                 _hostConfigReceived = false;
                 _hostCross = null;
                 _hostMod = null;
+                _hostRelicMod = null;
 
                 if (!ReferenceEquals(_net, net))
                 {
@@ -69,6 +71,7 @@ internal static class MultiplayerSync
             // turns it on. If any run-start path ever bypasses the lock-in, we stay pass-through
             // (mod does nothing) rather than filtering with un-synced local config (which desyncs).
             CardGuardService.DisableMpFiltering();
+            RelicGuardService.DisableMpFiltering();
 
             if (net.Type == NetGameType.Host)
             {
@@ -96,15 +99,17 @@ internal static class MultiplayerSync
         try
         {
             var (cross, mod) = CardGuardService.SnapshotLocalBlocks();
+            var relicMod = RelicGuardService.SnapshotLocalBlocks();
             var msg = new CardGuardConfigMessage
             {
                 magic = CardGuardNet.Magic,
                 protocol = CardGuardNet.Protocol,
                 crossBlock = cross,
                 modBlock = mod,
+                relicModBlock = relicMod,
             };
             net.SendMessage(msg);
-            Log.Info($"host config broadcast ({cross.Count} char-block set(s), {mod.Count} mod-block set(s)).");
+            Log.Info($"host config broadcast ({cross.Count} char-block set(s), {mod.Count} mod-block set(s), {relicMod.Count} relic-mod set(s)).");
         }
         catch (Exception ex) { Log.Warn($"SendConfigToAll failed: {ex.Message}"); }
     }
@@ -124,6 +129,7 @@ internal static class MultiplayerSync
             {
                 _hostCross = msg.crossBlock ?? new Dictionary<string, List<string>>();
                 _hostMod = msg.modBlock ?? new Dictionary<string, List<string>>();
+                _hostRelicMod = msg.relicModBlock ?? new Dictionary<string, List<string>>();
                 _hostConfigReceived = true;
             }
             // Acknowledge so the host knows it may safely enable filtering for the run.
@@ -162,11 +168,13 @@ internal static class MultiplayerSync
                     if (allAcked)
                     {
                         CardGuardService.ActivateMpLocal();
+                        RelicGuardService.ActivateMpLocal();
                         Log.Info("MP lock-in (host): all peers acked → filtering with host config.");
                     }
                     else
                     {
                         CardGuardService.DisableMpFiltering();
+                        RelicGuardService.DisableMpFiltering();
                         Log.Warn("MP lock-in (host): a peer did not ack (missing/old mod) → filtering OFF this run.");
                     }
                     break;
@@ -174,16 +182,18 @@ internal static class MultiplayerSync
                 case NetGameType.Client:
                 {
                     bool have;
-                    Dictionary<string, List<string>>? cross, mod;
-                    lock (_gate) { have = _hostConfigReceived; cross = _hostCross; mod = _hostMod; }
+                    Dictionary<string, List<string>>? cross, mod, relicMod;
+                    lock (_gate) { have = _hostConfigReceived; cross = _hostCross; mod = _hostMod; relicMod = _hostRelicMod; }
                     if (have)
                     {
                         CardGuardService.ActivateMpOverride(cross!, mod!);
+                        RelicGuardService.ActivateMpOverride(relicMod ?? new Dictionary<string, List<string>>());
                         Log.Info("MP lock-in (client): applying host config (own settings ignored this run).");
                     }
                     else
                     {
                         CardGuardService.DisableMpFiltering();
+                        RelicGuardService.DisableMpFiltering();
                         Log.Warn("MP lock-in (client): host config not received (host missing mod?) → filtering OFF this run.");
                     }
                     break;
@@ -191,6 +201,7 @@ internal static class MultiplayerSync
                 default:
                     // Singleplayer / fake-multiplayer: use local config normally.
                     CardGuardService.ClearMpState();
+                    RelicGuardService.ClearMpState();
                     break;
             }
         }
@@ -198,6 +209,7 @@ internal static class MultiplayerSync
         {
             Log.Warn($"LockInForRun failed ({ex.Message}) → disabling filtering to stay safe.");
             try { CardGuardService.DisableMpFiltering(); } catch { }
+            try { RelicGuardService.DisableMpFiltering(); } catch { }
         }
     }
 

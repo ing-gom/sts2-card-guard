@@ -16,7 +16,7 @@ namespace Sts2CardGuard;
 public partial class MainFile : Node
 {
     public const string ModId = "Sts2CardGuard";
-    public const string Version = "v0.3.2";
+    public const string Version = "v0.4.0";
 
     public static MegaCrit.Sts2.Core.Logging.Logger Logger { get; }
         = new(ModId, MegaCrit.Sts2.Core.Logging.LogType.Generic);
@@ -37,6 +37,13 @@ public partial class MainFile : Node
 
             Logger.Info($"[{ModId}] initialized ({Version}). Default policy: current character + colorless only. "
                         + "Settings: main menu → 'Card Guard' button (below the play button).");
+
+#if DEBUG
+            // No-op unless a matching sentinel sits next to the mod DLL (solo-verify / coop-verify).
+            // Debug-only: the test scaffolding is compiled out of Release/Workshop builds.
+            SoloTest.ArmIfRequested();
+            CoopTest.ArmIfRequested();
+#endif
         }
         catch (Exception ex)
         {

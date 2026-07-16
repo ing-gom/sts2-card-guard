@@ -32,6 +32,13 @@ public static class CardGuardPanel
     private static VBoxContainer? _leftList;
     private static string _selected = CardGuardService.CharacterTitles[0];
 
+    // Tabs: 0 = card packs, 1 = relic packs. Both are per character and share the left character
+    // column; only the right-hand allow list differs, so the tab just re-renders the right pane.
+    private static int _activeTab;
+    private static Label? _hint;
+    private static Button? _tabCardsBtn;
+    private static Button? _tabRelicsBtn;
+
     /// <summary>The character-select screen this panel is attached to (for reading the current selection).</summary>
     private static Node? _screen;
 
@@ -119,6 +126,19 @@ public static class CardGuardPanel
         if (_root == null || !GodotObject.IsInstanceValid(_root)) return;
         SyncSelectedToScreen();
         _root.Visible = true;
+        SwitchTab(_activeTab);
+    }
+
+    /// <summary>Activate a tab (0 = cards, 1 = relics) and rebuild both columns for it.</summary>
+    private static void SwitchTab(int tab)
+    {
+        _activeTab = tab;
+        bool cards = tab == 0;
+
+        if (_hint != null) _hint.Text = Loc.T(cards ? "hint" : "relic_hint");
+        if (_tabCardsBtn != null) _tabCardsBtn.AddThemeColorOverride("font_color", cards ? GOLD : GRAY);
+        if (_tabRelicsBtn != null) _tabRelicsBtn.AddThemeColorOverride("font_color", cards ? GRAY : GOLD);
+
         RebuildLeft();
         RebuildRight();
     }
@@ -190,18 +210,27 @@ public static class CardGuardPanel
         header.AddChild(x);
         vbox.AddChild(header);
 
-        var hint = new Label
+        // Tab bar: Cards | Relics.
+        var tabBar = new HBoxContainer();
+        tabBar.AddThemeConstantOverride("separation", 8);
+        _tabCardsBtn = MakeTab(Loc.T("tab_cards"), 0);
+        _tabRelicsBtn = MakeTab(Loc.T("tab_relics"), 1);
+        tabBar.AddChild(_tabCardsBtn);
+        tabBar.AddChild(_tabRelicsBtn);
+        vbox.AddChild(tabBar);
+
+        _hint = new Label
         {
             Text = Loc.T("hint"),
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        hint.AddThemeFontSizeOverride("font_size", 14);
-        hint.AddThemeColorOverride("font_color", GRAY);
-        vbox.AddChild(hint);
+        _hint.AddThemeFontSizeOverride("font_size", 14);
+        _hint.AddThemeColorOverride("font_color", GRAY);
+        vbox.AddChild(_hint);
 
         vbox.AddChild(new HSeparator());
 
-        // Body: left character list | right allow list.
+        // Body: left character selector | right allow list (cards or relics, per the active tab).
         var body = new HBoxContainer { SizeFlagsVertical = Control.SizeFlags.ExpandFill };
         body.AddThemeConstantOverride("separation", 16);
         vbox.AddChild(body);
@@ -240,6 +269,15 @@ public static class CardGuardPanel
         return root;
     }
 
+    /// <summary>A tab-bar button that activates <paramref name="tab"/>.</summary>
+    private static Button MakeTab(string text, int tab)
+    {
+        var b = new Button { Text = text, CustomMinimumSize = new Vector2(120, 40) };
+        b.AddThemeFontSizeOverride("font_size", 18);
+        b.Pressed += () => SwitchTab(tab);
+        return b;
+    }
+
     // ── Left: character selector ────────────────────────────
     private static void RebuildLeft()
     {
@@ -265,11 +303,13 @@ public static class CardGuardPanel
         }
     }
 
-    // ── Right: source allow list for the selected character ──
+    // ── Right: allow list for the selected character (cards or relics, per active tab) ──
     private static void RebuildRight()
     {
         if (_rightList == null) return;
         foreach (var c in _rightList.GetChildren()) c.QueueFree();
+
+        if (_activeTab == 1) { RebuildRelicsRight(); return; }
 
         _rightList.AddChild(SectionLabel(Loc.T("sec_char")));
 
@@ -320,6 +360,37 @@ public static class CardGuardPanel
                     CardGuardService.GetModAllowed(from, m),
                     v => { CardGuardService.SetModAllowed(from, m, v); CardGuardConfig.Save(); }));
             }
+        }
+    }
+
+    // ── Relics tab: per-character relic-mod allow list for the selected character ──
+    private static void RebuildRelicsRight()
+    {
+        if (_rightList == null) return;
+
+        _rightList.AddChild(SectionLabel(Loc.T("relic_sec")));
+
+        var mods = RelicGuardService.GetModRelicPacks()
+            .OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (mods.Count == 0)
+        {
+            var none = new Label { Text = Loc.T("no_relic_mods") };
+            none.AddThemeColorOverride("font_color", GRAY);
+            _rightList.AddChild(none);
+            return;
+        }
+
+        string from = _selected;
+        foreach (var kv in mods)
+        {
+            string m = kv.Key;
+            string lbl = $"{m}  —  {kv.Value.Total} " + Loc.T("relics");
+            _rightList.AddChild(MakeCheck(
+                lbl,
+                RelicGuardService.GetModAllowed(from, m),
+                v => { RelicGuardService.SetModAllowed(from, m, v); CardGuardConfig.Save(); }));
         }
     }
 

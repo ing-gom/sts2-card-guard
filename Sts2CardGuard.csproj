@@ -38,6 +38,12 @@
         <None Include="Sts2CardGuard.json" />
     </ItemGroup>
 
+    <!-- Test scaffolding (solo/coop-verify) is Debug-only; Release builds ship without it. -->
+    <ItemGroup Condition="'$(Configuration)' != 'Debug'">
+        <Compile Remove="Sts2CardGuardCode\SoloTest.cs" />
+        <Compile Remove="Sts2CardGuardCode\CoopTest.cs" />
+    </ItemGroup>
+
     <Target Name="CheckDependencyPaths">
         <Error Text=" Slay the Spire 2 data not found at path '$(Sts2DataDir)'"
                Condition="'$(Sts2DataDir)' == '' or !Exists('$(Sts2DataDir)')" />

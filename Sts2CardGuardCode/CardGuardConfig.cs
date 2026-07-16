@@ -21,6 +21,8 @@ internal static class CardGuardConfig
     {
         [JsonPropertyName("crossBlock")] public Dictionary<string, List<string>> CrossBlock { get; set; } = new();
         [JsonPropertyName("modBlock")] public Dictionary<string, List<string>> ModBlock { get; set; } = new();
+        // Per-character (pool title) blocked relic-mod names. See RelicGuardService.
+        [JsonPropertyName("relicModBlock")] public Dictionary<string, List<string>> RelicModBlock { get; set; } = new();
     }
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
@@ -53,6 +55,10 @@ internal static class CardGuardConfig
                 foreach (var mod in mods)
                     CardGuardService.SetModAllowed(character, mod, false);
 
+            foreach (var (character, relicMods) in model.RelicModBlock)
+                foreach (var relicMod in relicMods)
+                    RelicGuardService.SetModAllowed(character, relicMod, false);
+
             Log.Info("config loaded.");
         }
         catch (Exception ex)
@@ -73,6 +79,11 @@ internal static class CardGuardConfig
                 if (chars.Count > 0) model.CrossBlock[from] = chars;
                 var mods = CardGuardService.GetBlockedMods(from);
                 if (mods.Count > 0) model.ModBlock[from] = mods;
+            }
+            foreach (var title in RelicGuardService.GetConfiguredTitles())
+            {
+                var relicMods = RelicGuardService.GetBlockedMods(title);
+                if (relicMods.Count > 0) model.RelicModBlock[title] = relicMods;
             }
             File.WriteAllText(ConfigPath(), JsonSerializer.Serialize(model, JsonOpts));
         }

@@ -66,7 +66,7 @@ internal static class StartNewSingleplayerRun_Patch
 
     private static void Prefix()
     {
-        try { CardGuardService.ClearMpState(); }
+        try { CardGuardService.ClearMpState(); RelicGuardService.ClearMpState(); }
         catch (Exception ex) { Log.Warn($"StartNewSingleplayerRun hook failed: {ex.Message}"); }
     }
 }

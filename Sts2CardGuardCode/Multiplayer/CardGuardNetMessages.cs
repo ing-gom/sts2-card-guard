@@ -21,8 +21,9 @@ internal static class CardGuardNet
     /// <summary>"CGSH" — sanity marker written as the first field of every Card Guard message.</summary>
     public const int Magic = 0x43475348;
 
-    /// <summary>Wire-format version. Bump on any serialization change; mismatches are ignored.</summary>
-    public const int Protocol = 1;
+    /// <summary>Wire-format version. Bump on any serialization change; mismatches are ignored.
+    /// v2 added the global relic-mod block list.</summary>
+    public const int Protocol = 2;
 
     /// <summary>Defensive cap on decoded collection sizes (guards a misaligned/foreign packet).</summary>
     private const int MaxEntries = 100_000;
@@ -69,6 +70,7 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
     public int protocol;
     public Dictionary<string, List<string>>? crossBlock;
     public Dictionary<string, List<string>>? modBlock;
+    public Dictionary<string, List<string>>? relicModBlock;
 
     // Host sends directly to each peer; no onward relay needed.
     public readonly bool ShouldBroadcast => false;
@@ -82,6 +84,7 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
         writer.WriteInt(protocol);
         CardGuardNet.WriteMap(writer, crossBlock);
         CardGuardNet.WriteMap(writer, modBlock);
+        CardGuardNet.WriteMap(writer, relicModBlock);
     }
 
     public void Deserialize(PacketReader reader)
@@ -90,6 +93,7 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
         protocol = reader.ReadInt();
         crossBlock = CardGuardNet.ReadMap(reader);
         modBlock = CardGuardNet.ReadMap(reader);
+        relicModBlock = CardGuardNet.ReadMap(reader);
     }
 }
 

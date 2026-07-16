@@ -1,16 +1,25 @@
-# StS2 Card Guard
+# StS2 Card / Relic Pack Filter
 
-Control which **card packs** can appear in your Slay the Spire 2 run — per character. Stops other
-characters' cards and other mods' cards from being mixed into your card rewards, shops, events, and
-in-combat card generation.
+Control which **card packs and relics** can appear in your Slay the Spire 2 run — per character. Stops
+other characters' cards and other mods' cards/relics from being mixed into your rewards, shops, events,
+treasure, and in-combat generation.
 
 ![thumbnail](docs/thumb.png)
 
 ## Why
 
-With character mods and card mods installed, foreign cards can end up in your offers. Card Guard lets
-you pick, for each character, exactly which card packs (base characters, custom characters, and mods)
-are allowed to show up.
+With character mods and content mods installed, foreign cards and relics can end up in your offers.
+This mod lets you pick, per character, exactly which card packs and which mods' relics are allowed to
+show up. A two-tab panel (**Cards** / **Relics**) on the character-select screen drives it.
+
+## Relics & Ancients (v0.4.0)
+
+Blocking a mod on the **Relics** tab removes its relics from every run source (rewards, shops, treasure
+rooms); relics granted directly — including from Ancient events — are substituted with a normal relic.
+If a mod replaces the vanilla Ancient events with its own, blocking it restores that act's **original
+vanilla Ancient** in place of the mod's, so its custom ancient (and everything it offers) is gone.
+Base-game relics are never affected. Both card and relic filtering work in single-player and co-op
+(networked runs use the host's settings).
 
 ## How it works
 

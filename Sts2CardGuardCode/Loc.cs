@@ -20,8 +20,8 @@ internal static class Loc
 
     private static readonly Dictionary<string, string> En = new()
     {
-        ["button"] = "Card Pack Filter",
-        ["title"] = "Card Guard",
+        ["button"] = "Card / Relic Filter",
+        ["title"] = "Card / Relic Pack Filter",
         ["enable"] = "Enable",
         ["colorless"] = "Allow colorless",
         ["hint"] = "Default: all card packs are allowed. Pick a character on the left, then UNCHECK a pack on the right to block it for that character.",
@@ -32,12 +32,18 @@ internal static class Loc
         ["cards"] = "cards",
         ["no_mods"] = "(no non-character card mods)",
         ["mod_colorless_fmt"] = "  ({0} colorless)",
+        ["tab_cards"] = "Cards",
+        ["tab_relics"] = "Relics",
+        ["relic_hint"] = "Pick a character on the left, then UNCHECK a mod's relics to block them for that character. Base-game relics are never affected.",
+        ["relic_sec"] = "Mod relic packs",
+        ["relics"] = "relics",
+        ["no_relic_mods"] = "(no relic-adding mods)",
     };
 
     private static readonly Dictionary<string, string> Ko = new()
     {
-        ["button"] = "카드팩 필터",
-        ["title"] = "카드 가드",
+        ["button"] = "카드/유물 필터",
+        ["title"] = "카드/유물 팩 필터",
         ["enable"] = "사용",
         ["colorless"] = "무색 허용",
         ["hint"] = "기본: 모든 카드팩 허용. 왼쪽에서 캐릭터를 고르고, 오른쪽에서 차단할 카드팩의 체크를 해제하세요.",
@@ -48,12 +54,18 @@ internal static class Loc
         ["cards"] = "장",
         ["no_mods"] = "(캐릭터 외 카드 추가 모드 없음)",
         ["mod_colorless_fmt"] = "  (무색 {0}장)",
+        ["tab_cards"] = "카드",
+        ["tab_relics"] = "유물",
+        ["relic_hint"] = "왼쪽에서 캐릭터를 고르고, 오른쪽에서 차단할 모드 유물의 체크를 해제하세요(그 캐릭터에만 적용). 기본 유물은 영향받지 않습니다.",
+        ["relic_sec"] = "모드 유물팩",
+        ["relics"] = "개",
+        ["no_relic_mods"] = "(유물 추가 모드 없음)",
     };
 
     private static readonly Dictionary<string, string> Zh = new()
     {
-        ["button"] = "卡包过滤器",
-        ["title"] = "卡包过滤器",
+        ["button"] = "卡牌/遗物过滤器",
+        ["title"] = "卡牌/遗物包过滤器",
         ["enable"] = "启用",
         ["colorless"] = "允许无色卡",
         ["hint"] = "默认：允许所有卡包。在左侧选择角色，然后在右侧取消勾选某个卡包即可为该角色屏蔽。",
@@ -64,6 +76,12 @@ internal static class Loc
         ["cards"] = "张",
         ["no_mods"] = "(无非角色加牌模组)",
         ["mod_colorless_fmt"] = "  (无色 {0} 张)",
+        ["tab_cards"] = "卡牌",
+        ["tab_relics"] = "遗物",
+        ["relic_hint"] = "在左侧选择角色，然后在右侧取消勾选某个模组的遗物即可为该角色屏蔽。基础遗物不受影响。",
+        ["relic_sec"] = "模组遗物包",
+        ["relics"] = "件",
+        ["no_relic_mods"] = "(无添加遗物的模组)",
     };
 
     private static readonly Dictionary<string, Dictionary<string, string>> Langs = new()
