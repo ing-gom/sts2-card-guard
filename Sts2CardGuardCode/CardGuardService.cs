@@ -33,6 +33,14 @@ internal static class CardGuardService
     /// <summary>Per-character BLOCKED mod names. Empty by default = all allowed.</summary>
     private static readonly Dictionary<string, HashSet<string>> ModBlock = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Per-character BLOCKED individual card ids (see <see cref="CardIdOf"/>). MOD cards only: the
+    /// panel never lists base-game cards one by one, so a base card can still only be removed by
+    /// unchecking its whole character pack. Independent of the pack checkbox — a blocked pack hides
+    /// everything regardless of what is ticked here, and unblocking the pack restores these entries.
+    /// </summary>
+    private static readonly Dictionary<string, HashSet<string>> CardBlock = new(StringComparer.OrdinalIgnoreCase);
+
     private static readonly object _lock = new();
 
     // ---- Multiplayer effective-config override (see Multiplayer/MultiplayerSync) ----
@@ -45,6 +53,7 @@ internal static class CardGuardService
     private static volatile bool _mpUseOverride;
     private static readonly Dictionary<string, HashSet<string>> _ovrCrossBlock = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, HashSet<string>> _ovrModBlock = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, HashSet<string>> _ovrCardBlock = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Assembly that owns all base-game card models (sts2.dll).</summary>
     private static readonly System.Reflection.Assembly BaseGameAssembly = typeof(CardModel).Assembly;
@@ -91,6 +100,39 @@ internal static class CardGuardService
         }
     }
 
+    // ---- Individual card allow (default: allowed) ----
+
+    /// <summary>
+    /// Stable per-card key for individual blocks. <c>ModelId.ToString()</c> is the identity the game
+    /// itself writes to run saves (round-tripped by <c>ModelId.Deserialize</c>), so it survives
+    /// restarts and matches across peers.
+    /// </summary>
+    public static string CardIdOf(CardModel card)
+    {
+        try { return card.Id.ToString() ?? string.Empty; }
+        catch { return string.Empty; }
+    }
+
+    public static bool GetCardAllowed(string characterTitle, string cardId)
+    {
+        if (string.IsNullOrEmpty(cardId)) return true;
+        lock (_lock)
+        {
+            var d = _mpUseOverride ? _ovrCardBlock : CardBlock;
+            return !(d.TryGetValue(characterTitle, out var s) && s.Contains(cardId));
+        }
+    }
+
+    public static void SetCardAllowed(string characterTitle, string cardId, bool allowed)
+    {
+        if (string.IsNullOrEmpty(characterTitle) || string.IsNullOrEmpty(cardId)) return;
+        lock (_lock)
+        {
+            var s = Ensure(CardBlock, characterTitle);
+            if (allowed) s.Remove(cardId); else s.Add(cardId);
+        }
+    }
+
     // ---- Snapshots for persistence (what has been blocked) ----
 
     public static List<string> GetBlockedCharacters(string fromTitle)
@@ -103,10 +145,15 @@ internal static class CardGuardService
         lock (_lock) { return ModBlock.TryGetValue(characterTitle, out var s) ? s.ToList() : new List<string>(); }
     }
 
+    public static List<string> GetBlockedCards(string characterTitle)
+    {
+        lock (_lock) { return CardBlock.TryGetValue(characterTitle, out var s) ? s.ToList() : new List<string>(); }
+    }
+
     /// <summary>All character titles that currently have any block entry (for lossless save).</summary>
     public static List<string> GetConfiguredTitles()
     {
-        lock (_lock) { return CrossBlock.Keys.Concat(ModBlock.Keys).Distinct(OIC).ToList(); }
+        lock (_lock) { return CrossBlock.Keys.Concat(ModBlock.Keys).Concat(CardBlock.Keys).Distinct(OIC).ToList(); }
     }
 
     private static HashSet<string> Ensure(Dictionary<string, HashSet<string>> d, string key)
@@ -121,17 +168,19 @@ internal static class CardGuardService
 
     // ---- Multiplayer control (called only from MultiplayerSync, once per run at lock-in) ----
 
-    /// <summary>A copy of the LOCAL blocked-pack config (never the override) — what the host sends to peers.</summary>
-    public static (Dictionary<string, List<string>> cross, Dictionary<string, List<string>> mod) SnapshotLocalBlocks()
+    /// <summary>A copy of the LOCAL blocked config (never the override) — what the host sends to peers.</summary>
+    public static (Dictionary<string, List<string>> cross, Dictionary<string, List<string>> mod, Dictionary<string, List<string>> card) SnapshotLocalBlocks()
     {
         var cross = new Dictionary<string, List<string>>(OIC);
         var mod = new Dictionary<string, List<string>>(OIC);
+        var card = new Dictionary<string, List<string>>(OIC);
         lock (_lock)
         {
             foreach (var (k, s) in CrossBlock) if (s.Count > 0) cross[k] = s.ToList();
             foreach (var (k, s) in ModBlock) if (s.Count > 0) mod[k] = s.ToList();
+            foreach (var (k, s) in CardBlock) if (s.Count > 0) card[k] = s.ToList();
         }
-        return (cross, mod);
+        return (cross, mod, card);
     }
 
     /// <summary>Host of a networked run: filter with our own (local) config.</summary>
@@ -141,14 +190,16 @@ internal static class CardGuardService
     }
 
     /// <summary>Client of a networked run: filter with the HOST's config, ignoring our own.</summary>
-    public static void ActivateMpOverride(Dictionary<string, List<string>> cross, Dictionary<string, List<string>> mod)
+    public static void ActivateMpOverride(Dictionary<string, List<string>> cross, Dictionary<string, List<string>> mod, Dictionary<string, List<string>> card)
     {
         lock (_lock)
         {
             _ovrCrossBlock.Clear();
             _ovrModBlock.Clear();
+            _ovrCardBlock.Clear();
             foreach (var (k, v) in cross) _ovrCrossBlock[k] = new HashSet<string>(v, StringComparer.OrdinalIgnoreCase);
             foreach (var (k, v) in mod) _ovrModBlock[k] = new HashSet<string>(v, StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in card) _ovrCardBlock[k] = new HashSet<string>(v, StringComparer.OrdinalIgnoreCase);
             _mpUseOverride = true;
             _mpPassThrough = false;
         }
@@ -169,12 +220,15 @@ internal static class CardGuardService
             _mpUseOverride = false;
             _ovrCrossBlock.Clear();
             _ovrModBlock.Clear();
+            _ovrCardBlock.Clear();
         }
     }
 
     // ---- Dynamic discovery: characters (base + mod) ----
 
-    public readonly record struct CharInfo(string Title, string Display, int Count);
+    /// <summary><paramref name="IsMod"/> marks a mod-added (custom) character — only those have
+    /// individually blockable cards, since individual blocks are mod-only.</summary>
+    public readonly record struct CharInfo(string Title, string Display, int Count, bool IsMod);
 
     private static List<CharInfo>? _allChars;
     private static HashSet<string>? _characterModNames;
@@ -206,15 +260,16 @@ internal static class CardGuardService
                 if (!seen.Add(title)) continue;
                 int count = 0;
                 try { count = pool.AllCards.Count(); } catch { }
-                list.Add(new CharInfo(title, ResolveCharDisplay(ch, title), count));
 
                 // Record mod-added characters so their cards are controlled by the character
                 // checkbox only (not duplicated as a mod card pack).
+                bool isModChar = false;
                 try
                 {
                     var asm = ch.GetType().Assembly;
                     if (asm != BaseGameAssembly)
                     {
+                        isModChar = true;
                         var nm = asm.GetName().Name;
                         if (!string.IsNullOrEmpty(nm))
                         {
@@ -226,12 +281,14 @@ internal static class CardGuardService
                     }
                 }
                 catch { }
+
+                list.Add(new CharInfo(title, ResolveCharDisplay(ch, title), count, isModChar));
             }
         }
         catch (Exception ex) { Log.Warn($"character discovery failed: {ex.Message}"); }
 
         if (list.Count == 0)
-            foreach (var t in CharacterTitles) list.Add(new CharInfo(t, Capitalize(t), 0));
+            foreach (var t in CharacterTitles) list.Add(new CharInfo(t, Capitalize(t), 0, false));
 
         _characterModNames = modNames;
         _modCharTitles = modCharTitles;
@@ -287,18 +344,27 @@ internal static class CardGuardService
         public int Total;
         public int Colorless;
         public readonly Dictionary<string, int> PerPool = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The pack's distinct cards, for the panel's per-card detail list.</summary>
+        public readonly List<CardModel> Cards = new();
     }
 
     private static Dictionary<string, ModPack>? _modPacks;
 
+    /// <summary>Pool title → that pool's MOD cards. Feeds the detail list for a custom character,
+    /// whose cards are listed under the character section rather than as a mod card pack.</summary>
+    private static Dictionary<string, List<CardModel>>? _poolModCards;
+
     /// <summary>
     /// Every loaded mod that adds registered cards, mapped to its card counts (total, colorless,
-    /// and per-pool). Built by scanning all card pools' AllCards for cards from foreign assemblies.
+    /// and per-pool) and its card list. Built by scanning all card pools' AllCards for cards from
+    /// foreign assemblies, deduped by card id.
     /// </summary>
     public static IReadOnlyDictionary<string, ModPack> GetModCardPacks()
     {
         if (_modPacks != null) return _modPacks;
         var map = new Dictionary<string, ModPack>(OIC);
+        var poolCards = new Dictionary<string, List<CardModel>>(OIC);
+        var seenPerMod = new Dictionary<string, HashSet<string>>(OIC);
         try
         {
             foreach (var pool in ModelDb.AllCardPools)
@@ -313,17 +379,37 @@ internal static class CardGuardService
                     if (c == null || !IsModCard(c)) continue;
                     string mod = GetModName(c);
                     if (string.IsNullOrEmpty(mod)) continue;
+
+                    // Dedupe by id so the detail list never shows the same card twice.
+                    string cid = CardIdOf(c);
+                    if (!seenPerMod.TryGetValue(mod, out var seen)) { seen = new HashSet<string>(OIC); seenPerMod[mod] = seen; }
+                    if (cid.Length > 0 && !seen.Add(cid)) continue;
+
                     if (!map.TryGetValue(mod, out var mp)) { mp = new ModPack(); map[mod] = mp; }
                     mp.Total++;
                     if (pcolorless) mp.Colorless++;
                     mp.PerPool.TryGetValue(ptitle, out int n);
                     mp.PerPool[ptitle] = n + 1;
+                    mp.Cards.Add(c);
+
+                    if (!poolCards.TryGetValue(ptitle, out var pl)) { pl = new List<CardModel>(); poolCards[ptitle] = pl; }
+                    pl.Add(c);
                 }
             }
         }
         catch (Exception ex) { Log.Warn($"mod card pack scan failed: {ex.Message}"); }
+        _poolModCards = poolCards;
         _modPacks = map;
         return _modPacks;
+    }
+
+    /// <summary>The MOD cards sitting in the card pool titled <paramref name="poolTitle"/> (a custom
+    /// character's own cards). Empty for base-game pools — individual blocks are mod-only.</summary>
+    public static IReadOnlyList<CardModel> GetPoolModCards(string poolTitle)
+    {
+        if (_poolModCards == null) GetModCardPacks();
+        if (_poolModCards != null && _poolModCards.TryGetValue(poolTitle ?? string.Empty, out var l)) return l;
+        return Array.Empty<CardModel>();
     }
 
     // ---- Core filter ----
@@ -452,6 +538,11 @@ internal static class CardGuardService
     private static bool IsAllowed(CardModel card, CardPoolModel currentPool)
     {
         string currentTitle = currentPool.Title ?? string.Empty;
+
+        // Individual card block (mod cards only — the panel lists no base cards one by one).
+        // Independent of the pack gates below: either one blocking is enough to drop the card.
+        // Checked up front so it also holds for a card whose Pool can't be resolved.
+        if (IsModCard(card) && !GetCardAllowed(currentTitle, CardIdOf(card))) return false;
 
         CardPoolModel pool;
         try { pool = card.Pool; }

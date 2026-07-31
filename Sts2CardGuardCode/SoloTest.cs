@@ -23,6 +23,7 @@ using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Runs;
@@ -68,6 +69,11 @@ internal static class SoloTest
         {
             if (NGame.Instance == null) { W("waiting for NGame…"); return; }
             if (ModelCount() == 0) { W("waiting for ModelDb to populate…"); return; }
+            // ★ModelDb-populated is still not enough in a heavy modded environment: the registry fills
+            // long before the MAIN MENU finishes loading, so starting the run here transitions before the
+            // game is ready — NTransition.RoomFadeOut() NREs inside StartNewSingleplayerRun. Gate on the
+            // main-menu node existing (this bit the first run of this very test).
+            if (FindNode<NMainMenu>(tree.Root) == null) { W("waiting for main menu…"); return; }
             _started = true;
             Step("starting single-player run");
             TaskHelper.RunSafely(StartRunThenTest());
@@ -87,6 +93,18 @@ internal static class SoloTest
         _step = name;
         _stepAt = DateTime.UtcNow;
         W($"— {name}");
+    }
+
+    /// <summary>Depth-first search for the first node of type T — gates run start on the main menu.</summary>
+    private static T? FindNode<T>(Node n) where T : class
+    {
+        if (n is T t) return t;
+        foreach (var c in n.GetChildren())
+        {
+            var r = FindNode<T>(c);
+            if (r != null) return r;
+        }
+        return null;
     }
 
     private static int ModelCount()
@@ -118,7 +136,17 @@ internal static class SoloTest
             StartAutomation();
             await Shot("1_run");
 
-            bool ok = await RunRelicFilterTest(player);
+            bool okBag = await RunRelicFilterTest(player);
+            bool okRelicOne = RunIndividualRelicTest(player);
+            bool okCardOne = RunIndividualCardTest(player);
+            bool okCfg = RunConfigRoundTripTest(player);
+            bool okLink = RunPackLinkageTest(player);
+            await ShotPanel(player);
+
+            bool ok = okBag && okRelicOne && okCardOne && okCfg && okLink && _hoverOk;
+            W($"=== summary: grabbag/ancient={okBag}, individual-relic={okRelicOne}, "
+              + $"individual-card={okCardOne}, config-roundtrip={okCfg}, pack-linkage={okLink}, "
+              + $"hover-preview={_hoverOk} ===");
 
             await Shot("2_final");
             W("=== solo test done ===");
@@ -306,6 +334,436 @@ internal static class SoloTest
         Step("ancient verdict");
         W($"assert: blocked ancient relic NOT held = {!hasBlockedAncient}; a substitute WAS granted = {gainedSomething}");
         return gainedSomething && !hasBlockedAncient;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Individual (per-item) blocking. The pack checkbox stays ALLOWED throughout — otherwise these
+    // would just be re-testing the pack gate the tests above already cover. The discriminating
+    // assertion is therefore "victim gone AND its pack-mates still there".
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Relic side: block ONE relic of an allowed mod pack and re-populate the grab bag.</summary>
+    private static bool RunIndividualRelicTest(Player player)
+    {
+        Step("individual relic: find a mod with >=2 grab-bag relics");
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+
+        List<RelicModel> universe;
+        try
+        {
+            universe = ModelDb.AllRelicPools
+                .SelectMany(pool => { try { return pool.GetUnlockedRelics(UnlockState.all); } catch { return Enumerable.Empty<RelicModel>(); } })
+                .Where(r => r != null && GrabBagRarities.Contains(r.Rarity.ToString()))
+                .Distinct().ToList();
+        }
+        catch (Exception e) { W($"universe build failed: {e.Message}"); return false; }
+
+        var group = universe.Where(RelicGuardService.IsModRelic)
+            .GroupBy(RelicGuardService.ModNameOf, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() >= 2)
+            .OrderByDescending(g => g.Count())
+            .FirstOrDefault();
+        if (group == null)
+        {
+            W("assert: no mod contributes >=2 grab-bag relics — cannot tell individual from pack blocking. SKIP.");
+            return true;
+        }
+
+        string mod = group.Key;
+        string victimId = RelicGuardService.RelicIdOf(group.First());
+        W($"target: mod '{mod}' ({group.Count()} grab-bag relic(s)), victim '{victimId}'");
+
+        RelicGuardService.SetModAllowed(charTitle, mod, true);       // pack ALLOWED for the whole test
+        RelicGuardService.SetRelicAllowed(charTitle, victimId, true);
+
+        Step("individual relic: baseline populate");
+        var b = PopulateAndSplit(universe, mod, victimId);
+        W($"baseline: victim={b.victim}, pack-mates={b.mates}, base={b.baseCount}");
+        if (b.victim == 0) { W("assert: victim absent from baseline bag — aborting."); return false; }
+
+        Step("individual relic: block ONE relic, re-populate");
+        RelicGuardService.SetRelicAllowed(charTitle, victimId, false);
+        var f = PopulateAndSplit(universe, mod, victimId);
+        W($"filtered: victim={f.victim}, pack-mates={f.mates}, base={f.baseCount}");
+
+        Step("individual relic verdict");
+        bool victimGone = f.victim == 0;
+        bool matesKept = b.mates > 0 && f.mates == b.mates;
+        bool baseKept = f.baseCount == b.baseCount;
+        W($"assert: blocked relic removed = {victimGone} ({b.victim} -> {f.victim})");
+        W($"assert: same-pack relics KEPT = {matesKept} ({b.mates} -> {f.mates})");
+        W($"assert: base relics untouched = {baseKept} ({b.baseCount} -> {f.baseCount})");
+
+        RelicGuardService.SetRelicAllowed(charTitle, victimId, true);
+        return victimGone && matesKept && baseKept;
+    }
+
+    /// <summary>Card side: block ONE card of an allowed mod pack and re-run the real Filter path.</summary>
+    private static bool RunIndividualCardTest(Player player)
+    {
+        Step("individual card: find a mod card pack with >=2 cards visible to this character");
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+
+        var packs = CardGuardService.GetModCardPacks();
+        W($"mod card packs discovered: {packs.Count}");
+        foreach (var p in packs)
+            W($"  {p.Key}: {p.Value.Total} card(s), {p.Value.Colorless} colorless, listed {p.Value.Cards.Count}");
+
+        string mod = "";
+        List<CardModel> visible = new();
+        foreach (var kv in packs.OrderByDescending(k => k.Value.Cards.Count))
+        {
+            CardGuardService.SetModAllowed(charTitle, kv.Key, true);
+            var v = kv.Value.Cards.Where(c => CardGuardService.WouldAppear(c, player)).ToList();
+            if (v.Count >= 2) { mod = kv.Key; visible = v; break; }
+        }
+        if (visible.Count < 2)
+        {
+            W("assert: no mod card pack has >=2 cards reaching this character — SKIP.");
+            return true;
+        }
+
+        var victim = visible[0];
+        string victimId = CardGuardService.CardIdOf(victim);
+        W($"target: pack '{mod}', {visible.Count} visible card(s), victim '{victimId}'");
+
+        CardGuardService.SetCardAllowed(charTitle, victimId, true);
+
+        Step("individual card: baseline Filter");
+        var baseKept = CardGuardService.Filter(visible, player).ToList();
+        W($"baseline: {baseKept.Count}/{visible.Count} kept");
+
+        Step("individual card: block ONE card, re-Filter");
+        CardGuardService.SetCardAllowed(charTitle, victimId, false);
+        var kept = CardGuardService.Filter(visible, player).ToList();
+        W($"filtered: {kept.Count}/{visible.Count} kept");
+
+        Step("individual card verdict");
+        bool victimGone = !kept.Any(c => string.Equals(CardGuardService.CardIdOf(c), victimId, StringComparison.OrdinalIgnoreCase));
+        bool exactlyOne = kept.Count == baseKept.Count - 1;
+        bool reportAgrees = !CardGuardService.WouldAppear(victim, player);
+        W($"assert: blocked card removed = {victimGone}");
+        W($"assert: exactly one card removed = {exactlyOne} ({baseKept.Count} -> {kept.Count})");
+        W($"assert: WouldAppear(victim) == false = {reportAgrees}  (what the 'cardguard' console reports)");
+
+        CardGuardService.SetCardAllowed(charTitle, victimId, true);
+        return victimGone && exactlyOne && reportAgrees;
+    }
+
+    /// <summary>
+    /// Persistence round-trip for the new individual blocks: write, wipe at runtime, re-Load. The
+    /// real settings file is snapshotted first and restored in the finally, so a test run never
+    /// rewrites the player's own configuration.
+    /// </summary>
+    private static bool RunConfigRoundTripTest(Player player)
+    {
+        Step("config round-trip: snapshot settings file");
+        string path = Path.Combine(ModDir(), "Settings", "card_guard_config.txt");
+        string? backup = null;
+        bool existed = false;
+        try { existed = File.Exists(path); if (existed) backup = File.ReadAllText(path); }
+        catch (Exception e) { W($"backup read failed: {e.Message}"); }
+        W($"existing config: {(existed ? backup?.Length + " bytes" : "(none)")}");
+
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+        const string probeCard = "CARD.CG_PROBE_CARD";
+        const string probeRelic = "RELIC.CG_PROBE_RELIC";
+        bool ok = false;
+        try
+        {
+            CardGuardService.SetCardAllowed(charTitle, probeCard, false);
+            RelicGuardService.SetRelicAllowed(charTitle, probeRelic, false);
+            CardGuardConfig.Save();
+
+            string written = File.Exists(path) ? File.ReadAllText(path) : "";
+            bool onDisk = written.Contains(probeCard, StringComparison.Ordinal)
+                          && written.Contains(probeRelic, StringComparison.Ordinal)
+                          && written.Contains("\"cardBlock\"", StringComparison.Ordinal)
+                          && written.Contains("\"relicBlock\"", StringComparison.Ordinal);
+            W($"assert: probes written under cardBlock/relicBlock = {onDisk} ({written.Length} bytes)");
+
+            // Wipe at runtime, then re-Load — the file must put them back.
+            CardGuardService.SetCardAllowed(charTitle, probeCard, true);
+            RelicGuardService.SetRelicAllowed(charTitle, probeRelic, true);
+            bool cleared = CardGuardService.GetCardAllowed(charTitle, probeCard)
+                           && RelicGuardService.GetRelicAllowed(charTitle, probeRelic);
+
+            CardGuardConfig.Load();
+            bool reCard = !CardGuardService.GetCardAllowed(charTitle, probeCard);
+            bool reRelic = !RelicGuardService.GetRelicAllowed(charTitle, probeRelic);
+            W($"assert: cleared at runtime = {cleared}");
+            W($"assert: restored by Load = card {reCard}, relic {reRelic}");
+            ok = onDisk && cleared && reCard && reRelic;
+        }
+        catch (Exception e) { W($"config round-trip failed: {e.Message}"); ok = false; }
+        finally
+        {
+            try { CardGuardService.SetCardAllowed(charTitle, probeCard, true); } catch { }
+            try { RelicGuardService.SetRelicAllowed(charTitle, probeRelic, true); } catch { }
+            try
+            {
+                if (backup != null) File.WriteAllText(path, backup);
+                else if (File.Exists(path)) File.Delete(path);
+                W("settings file restored to its original state");
+            }
+            catch (Exception e) { W($"settings restore FAILED: {e.Message}"); }
+        }
+        Step("config round-trip verdict");
+        return ok;
+    }
+
+    /// <summary>
+    /// Visual evidence for the new drill-down UI: the pack list, then a pack's per-item detail list.
+    /// Logic asserts can't see a broken layout, so these two shots are the only proof the detail
+    /// view actually renders.
+    /// </summary>
+    private static async Task ShotPanel(Player player)
+    {
+        Step("panel screenshots");
+        try
+        {
+            if (Engine.GetMainLoop() is not SceneTree tree) return;
+            string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+            Ui.CardGuardPanel.TestSelect(charTitle);
+
+            // Prefer a relic pack (that tab is mod-only, so every row is drillable).
+            var relicMod = RelicGuardService.GetModRelicPacks()
+                .OrderByDescending(k => k.Value.Total).Select(k => k.Key).FirstOrDefault();
+            var cardMod = CardGuardService.GetModCardPacks()
+                .OrderByDescending(k => k.Value.Cards.Count).Select(k => k.Key).FirstOrDefault();
+
+            // Block the two alphabetically-first relics of the pack so the shots show real partial
+            // blocking — the pack row's "(2개 차단)" suffix and the detail header's "2 / N 차단".
+            // An all-allowed screenshot can't distinguish "renders correctly" from "state ignored".
+            var staged = new List<string>();
+            var stagedCards = new List<string>();
+            try
+            {
+                if (relicMod != null && RelicGuardService.GetModRelicPacks().TryGetValue(relicMod, out var rp))
+                    foreach (var r in rp.Relics
+                                 .OrderBy(x => { try { return x.Title?.GetFormattedText() ?? ""; } catch { return ""; } },
+                                          StringComparer.CurrentCultureIgnoreCase)
+                                 .Take(2))
+                    {
+                        string id = RelicGuardService.RelicIdOf(r);
+                        if (id.Length == 0) continue;
+                        RelicGuardService.SetRelicAllowed(charTitle, id, false);
+                        staged.Add(id);
+                    }
+                W($"staged {staged.Count} individually-blocked relic(s) for the screenshots");
+
+                Ui.CardGuardPanel.TestOpen(tree.Root, relicMod != null ? 1 : 0, null, relicMod != null);
+                await Task.Delay(900);
+                await Shot("3_panel_packs");
+
+                string? drill = relicMod ?? cardMod;
+                if (drill != null)
+                {
+                    Ui.CardGuardPanel.TestOpen(tree.Root, relicMod != null ? 1 : 0, drill, relicMod != null);
+                    await Task.Delay(900);
+                    await Shot("4_panel_detail");
+                    W($"detail shot taken for pack '{drill}' ({(relicMod != null ? "relics" : "cards")} tab)");
+                }
+                else W("no mod packs to drill into — detail shot skipped");
+
+                // Cards tab too: it is the only place mod_colorless_fmt renders, and that string hits
+                // the same loc-format path as the blocked-count suffix.
+                if (cardMod != null && CardGuardService.GetModCardPacks().TryGetValue(cardMod, out var mp))
+                {
+                    foreach (var c in mp.Cards.Take(3))
+                    {
+                        string id = CardGuardService.CardIdOf(c);
+                        if (id.Length == 0) continue;
+                        CardGuardService.SetCardAllowed(charTitle, id, false);
+                        stagedCards.Add(id);
+                    }
+                    W($"staged {stagedCards.Count} individually-blocked card(s) for the cards-tab shot");
+                    Ui.CardGuardPanel.TestOpen(tree.Root, 0, null, false);
+                    await Task.Delay(900);
+                    await Shot("5_panel_cards");
+
+                    _hoverOk = await RunHoverPreviewTest(tree, cardMod);
+                }
+            }
+            finally
+            {
+                foreach (var id in staged)
+                    try { RelicGuardService.SetRelicAllowed(charTitle, id, true); } catch { }
+                foreach (var id in stagedCards)
+                    try { CardGuardService.SetCardAllowed(charTitle, id, true); } catch { }
+                Ui.CardGuardPanel.TestClose();
+            }
+            await Task.Delay(400);
+        }
+        catch (Exception e) { W($"panel screenshots failed: {e.Message}"); }
+    }
+
+    /// <summary>Set by <see cref="RunHoverPreviewTest"/>; folded into the overall verdict.</summary>
+    private static bool _hoverOk = true;
+
+    /// <summary>
+    /// The pack checkbox and its detail list must behave as one setting:
+    ///   pack off      → every item off
+    ///   pack on       → every item on
+    ///   some items on → pack reads "partial"
+    ///   last item off → pack blocks itself (so the pack-only content it gates goes too)
+    ///   an item back on → pack un-blocks itself
+    /// Runtime only — none of these hooks call Save(), so the player's config file is untouched.
+    /// </summary>
+    private static bool RunPackLinkageTest(Player player)
+    {
+        Step("pack linkage: pick a relic pack with >=3 items");
+        const int RELICS = 3; // kind: mod relics
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+        Ui.CardGuardPanel.TestSelect(charTitle);
+
+        string key = "";
+        List<string> ids = new();
+        foreach (var kv in RelicGuardService.GetModRelicPacks().OrderByDescending(k => k.Value.Total))
+        {
+            var candidate = Ui.CardGuardPanel.TestPackItemIds(RELICS, kv.Key);
+            if (candidate.Count >= 3) { key = kv.Key; ids = candidate; break; }
+        }
+        if (ids.Count < 3) { W("assert: no relic pack with >=3 items — SKIP linkage test."); return true; }
+        W($"target pack '{key}' with {ids.Count} item(s)");
+
+        bool ok = true;
+        void Check(string what, bool cond)
+        {
+            W($"assert: {what} = {cond}");
+            if (!cond) ok = false;
+        }
+
+        // 1) Pack ON → everything on, nothing partial.
+        Ui.CardGuardPanel.TestPackToggle(RELICS, key, true);
+        var s = Ui.CardGuardPanel.TestPackState(RELICS, key);
+        W($"  after pack ON  : total={s.total} allowed={s.allowed} blocked={s.blocked} partial={s.partial}");
+        Check("pack ON allows every item", s.allowed == s.total && !s.blocked && !s.partial);
+
+        // 2) Pack OFF → every item off too (the linkage the user asked for).
+        Ui.CardGuardPanel.TestPackToggle(RELICS, key, false);
+        s = Ui.CardGuardPanel.TestPackState(RELICS, key);
+        int stillAllowed = ids.Count(id => RelicGuardService.GetRelicAllowed(charTitle, id));
+        W($"  after pack OFF : total={s.total} allowed={s.allowed} blocked={s.blocked} partial={s.partial}, rawAllowedIds={stillAllowed}");
+        Check("pack OFF blocks the pack", s.blocked);
+        Check("pack OFF switches every item off", stillAllowed == 0 && s.allowed == 0);
+        Check("pack OFF is not shown as partial", !s.partial);
+
+        // 3) Back ON, then switch ONE item off → partial, pack still allowed.
+        Ui.CardGuardPanel.TestPackToggle(RELICS, key, true);
+        Ui.CardGuardPanel.TestItemToggle(RELICS, key, ids[0], false);
+        s = Ui.CardGuardPanel.TestPackState(RELICS, key);
+        W($"  one item off   : total={s.total} allowed={s.allowed} blocked={s.blocked} partial={s.partial}");
+        Check("one item off reads as partial", s.partial);
+        Check("one item off leaves the pack allowed", !s.blocked && s.allowed == s.total - 1);
+
+        // 4) Switch the REST off → the pack blocks itself.
+        for (int i = 1; i < ids.Count; i++) Ui.CardGuardPanel.TestItemToggle(RELICS, key, ids[i], false);
+        s = Ui.CardGuardPanel.TestPackState(RELICS, key);
+        W($"  all items off  : total={s.total} allowed={s.allowed} blocked={s.blocked} partial={s.partial}");
+        Check("last item off blocks the pack", s.blocked && s.allowed == 0 && !s.partial);
+
+        // 5) One back on → the pack un-blocks itself, else the flag would keep suppressing it.
+        Ui.CardGuardPanel.TestItemToggle(RELICS, key, ids[0], true);
+        s = Ui.CardGuardPanel.TestPackState(RELICS, key);
+        W($"  one back on    : total={s.total} allowed={s.allowed} blocked={s.blocked} partial={s.partial}");
+        Check("an item returning un-blocks the pack", !s.blocked && s.allowed == 1);
+        Check("that state reads as partial", s.partial || s.total == 1);
+
+        Step("pack linkage verdict");
+        Ui.CardGuardPanel.TestPackToggle(RELICS, key, true); // leave it clean
+        return ok;
+    }
+
+    /// <summary>
+    /// The card hover preview borrows a node from the game's shared 30-node NCard pool. Screenshots
+    /// prove it renders; only the pool free-count proves it is RETURNED — a preview leaked per hover
+    /// would quietly starve the pool the real combat cards come from.
+    /// </summary>
+    private static async Task<bool> RunHoverPreviewTest(SceneTree tree, string cardMod)
+    {
+        Step("hover preview: open a card pack detail list");
+        try
+        {
+            Ui.CardGuardPanel.TestOpen(tree.Root, 0, cardMod, false);
+            await Task.Delay(900);
+
+            // The real mouse cursor sits wherever the user left it; if that lands on a card row the
+            // game fires MouseEntered for real and a preview is already borrowed. Clear first so the
+            // baseline is well-defined instead of depending on cursor position.
+            Ui.CardGuardPanel.TestUnhover();
+            await Task.Delay(300);
+            int freeBefore = Ui.CardGuardPanel.TestCardPoolFree();
+            if (freeBefore < 0) { W("assert: NCard pool not reachable — SKIP hover test."); return true; }
+
+            Ui.CardGuardPanel.TestHoverFirstCard();
+            await Task.Delay(900);
+            var (shown, isRealCard) = Ui.CardGuardPanel.TestPreviewState();
+            int freeDuring = Ui.CardGuardPanel.TestCardPoolFree();
+            await Shot("6_panel_card_hover");
+
+            // Control case: a base-game card from the live deck. If this renders but the mod card
+            // above does not, the fault is the mod's card data, not our preview plumbing.
+            try
+            {
+                var deckCard = RunManager.Instance?.State?.Players?.FirstOrDefault()?.Deck?.Cards?.FirstOrDefault();
+                if (deckCard != null)
+                {
+                    Ui.CardGuardPanel.TestUnhover();
+                    await Task.Delay(300);
+                    Ui.CardGuardPanel.TestHoverCard(deckCard);
+                    await Task.Delay(700);
+                    await Shot("7_panel_hover_basecard");
+                    W($"control shot: base-game deck card '{deckCard.Id.Entry}' (title='{deckCard.Title}')");
+                }
+                else W("control shot skipped — no deck card available");
+            }
+            catch (Exception e) { W($"control shot failed: {e.Message}"); }
+
+            Step("hover preview: unhover");
+            Ui.CardGuardPanel.TestUnhover();
+            await Task.Delay(700);
+            var (shownAfter, _) = Ui.CardGuardPanel.TestPreviewState();
+            int freeAfter = Ui.CardGuardPanel.TestCardPoolFree();
+
+            Step("hover preview verdict");
+            W($"NCard pool free: before={freeBefore}, during={freeDuring}, after={freeAfter}");
+            bool borrowed = !isRealCard || freeDuring == freeBefore - 1;
+            bool returned = freeAfter == freeBefore;
+            W($"assert: preview mounted on hover = {shown} (real pooled NCard = {isRealCard})");
+            W($"assert: pooled node borrowed while shown = {borrowed}");
+            W($"assert: preview torn down on unhover = {!shownAfter}");
+            W($"assert: pooled node RETURNED (no leak) = {returned}");
+            return shown && borrowed && !shownAfter && returned;
+        }
+        catch (Exception e) { W($"hover preview test failed: {e.Message}"); return false; }
+    }
+
+    /// <summary>Populate a fresh bag and split the count into (base, same-pack mates, the victim).</summary>
+    private static (int baseCount, int mates, int victim) PopulateAndSplit(List<RelicModel> relics, string mod, string victimId)
+    {
+        try
+        {
+            var bag = new RelicGrabBag(refreshAllowed: false);
+            bag.Populate(relics, new Rng(12345u));
+            int baseCount = 0, mates = 0, victim = 0;
+            var deques = bag._deques;
+            if (deques == null) return (0, 0, 0);
+            foreach (var list in deques.Values)
+            {
+                if (list == null) continue;
+                foreach (var r in list)
+                {
+                    if (r == null) continue;
+                    if (!RelicGuardService.IsModRelic(r)) { baseCount++; continue; }
+                    if (!string.Equals(RelicGuardService.ModNameOf(r), mod, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (string.Equals(RelicGuardService.RelicIdOf(r), victimId, StringComparison.OrdinalIgnoreCase)) victim++;
+                    else mates++;
+                }
+            }
+            return (baseCount, mates, victim);
+        }
+        catch (Exception e) { W($"populate failed: {e.Message}"); return (0, 0, 0); }
     }
 
     /// <summary>Populate a fresh bag from <paramref name="relics"/> (Postfix filters it) and count.</summary>

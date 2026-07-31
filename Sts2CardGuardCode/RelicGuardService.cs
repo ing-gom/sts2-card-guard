@@ -33,6 +33,13 @@ internal static class RelicGuardService
     /// <summary>Per-character (pool title) BLOCKED relic-mod names. Empty by default = all allowed.</summary>
     private static readonly Dictionary<string, HashSet<string>> ModBlock = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Per-character (pool title) BLOCKED individual relic ids (see <see cref="RelicIdOf"/>). MOD
+    /// relics only, matching the pack-level scope — base-game relics are never touched. Independent
+    /// of the pack checkbox: a blocked pack drops everything regardless of what is ticked here.
+    /// </summary>
+    private static readonly Dictionary<string, HashSet<string>> RelicBlock = new(StringComparer.OrdinalIgnoreCase);
+
     // ---- Multiplayer effective-config override (locked in once per run; see MultiplayerSync) ----
     private static volatile bool _mpPassThrough;
     private static volatile bool _mpUseOverride;
@@ -41,6 +48,7 @@ internal static class RelicGuardService
     // run identically on every peer — only the grab-bag filter, RNG-neutral and host-locked, runs in co-op.
     private static volatile bool _networked;
     private static readonly Dictionary<string, HashSet<string>> _ovrModBlock = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, HashSet<string>> _ovrRelicBlock = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Assembly that owns all base-game relic models (sts2.dll).</summary>
     private static readonly Assembly BaseGameAssembly = typeof(RelicModel).Assembly;
@@ -72,10 +80,46 @@ internal static class RelicGuardService
         lock (_lock) { return ModBlock.TryGetValue(characterTitle, out var s) ? s.ToList() : new List<string>(); }
     }
 
+    // ---- Individual relic allow (default: allowed) ----
+
+    /// <summary>Stable per-relic key. <c>ModelId.ToString()</c> is the game's own save-file identity
+    /// (round-tripped by <c>ModelId.Deserialize</c>), so it survives restarts and matches across peers.</summary>
+    public static string RelicIdOf(RelicModel relic)
+    {
+        try { return relic.Id.ToString() ?? string.Empty; }
+        catch { return string.Empty; }
+    }
+
+    public static bool GetRelicAllowed(string characterTitle, string relicId)
+    {
+        if (string.IsNullOrEmpty(relicId)) return true;
+        lock (_lock)
+        {
+            var d = _mpUseOverride ? _ovrRelicBlock : RelicBlock;
+            return !(d.TryGetValue(characterTitle, out var s) && s.Contains(relicId));
+        }
+    }
+
+    public static void SetRelicAllowed(string characterTitle, string relicId, bool allowed)
+    {
+        if (string.IsNullOrEmpty(characterTitle) || string.IsNullOrEmpty(relicId)) return;
+        lock (_lock)
+        {
+            var s = Ensure(RelicBlock, characterTitle);
+            if (allowed) s.Remove(relicId); else s.Add(relicId);
+        }
+    }
+
+    /// <summary>The blocked individual relic ids for one character (for lossless save).</summary>
+    public static List<string> GetBlockedRelics(string characterTitle)
+    {
+        lock (_lock) { return RelicBlock.TryGetValue(characterTitle, out var s) ? s.ToList() : new List<string>(); }
+    }
+
     /// <summary>All character titles that currently have any relic block entry.</summary>
     public static List<string> GetConfiguredTitles()
     {
-        lock (_lock) { return ModBlock.Keys.ToList(); }
+        lock (_lock) { return ModBlock.Keys.Concat(RelicBlock.Keys).Distinct(OIC).ToList(); }
     }
 
     private static HashSet<string> Ensure(Dictionary<string, HashSet<string>> d, string key)
@@ -86,12 +130,17 @@ internal static class RelicGuardService
 
     // ---- Multiplayer control (called only from MultiplayerSync, once per run at lock-in) ----
 
-    /// <summary>A copy of the LOCAL blocked-pack config (never the override) — what the host sends to peers.</summary>
-    public static Dictionary<string, List<string>> SnapshotLocalBlocks()
+    /// <summary>A copy of the LOCAL blocked config (never the override) — what the host sends to peers.</summary>
+    public static (Dictionary<string, List<string>> mod, Dictionary<string, List<string>> relic) SnapshotLocalBlocks()
     {
         var mod = new Dictionary<string, List<string>>(OIC);
-        lock (_lock) { foreach (var (k, s) in ModBlock) if (s.Count > 0) mod[k] = s.ToList(); }
-        return mod;
+        var relic = new Dictionary<string, List<string>>(OIC);
+        lock (_lock)
+        {
+            foreach (var (k, s) in ModBlock) if (s.Count > 0) mod[k] = s.ToList();
+            foreach (var (k, s) in RelicBlock) if (s.Count > 0) relic[k] = s.ToList();
+        }
+        return (mod, relic);
     }
 
     public static void ActivateMpLocal()
@@ -99,12 +148,14 @@ internal static class RelicGuardService
         lock (_lock) { _mpUseOverride = false; _mpPassThrough = false; _networked = true; }
     }
 
-    public static void ActivateMpOverride(Dictionary<string, List<string>> mod)
+    public static void ActivateMpOverride(Dictionary<string, List<string>> mod, Dictionary<string, List<string>> relic)
     {
         lock (_lock)
         {
             _ovrModBlock.Clear();
+            _ovrRelicBlock.Clear();
             foreach (var (k, v) in mod) _ovrModBlock[k] = new HashSet<string>(v, StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in relic) _ovrRelicBlock[k] = new HashSet<string>(v, StringComparer.OrdinalIgnoreCase);
             _mpUseOverride = true; _mpPassThrough = false; _networked = true;
         }
     }
@@ -116,7 +167,7 @@ internal static class RelicGuardService
 
     public static void ClearMpState()
     {
-        lock (_lock) { _mpPassThrough = false; _mpUseOverride = false; _networked = false; _ovrModBlock.Clear(); }
+        lock (_lock) { _mpPassThrough = false; _mpUseOverride = false; _networked = false; _ovrModBlock.Clear(); _ovrRelicBlock.Clear(); }
     }
 
     /// <summary>True when filtering is disabled for the current (networked) run.</summary>
@@ -139,12 +190,14 @@ internal static class RelicGuardService
         catch { return string.Empty; }
     }
 
-    /// <summary>Whether <paramref name="relic"/> is blocked for the character pool <paramref name="characterTitle"/>. Base relics: never.</summary>
+    /// <summary>Whether <paramref name="relic"/> is blocked for the character pool <paramref name="characterTitle"/>.
+    /// Blocked when EITHER the relic is individually blocked or its whole mod pack is. Base relics: never.</summary>
     public static bool IsRelicBlockedForCharacter(RelicModel relic, string characterTitle)
     {
         if (_mpPassThrough) return false;
         if (string.IsNullOrEmpty(characterTitle)) return false;
         if (!IsModRelic(relic)) return false;
+        if (!GetRelicAllowed(characterTitle, RelicIdOf(relic))) return true;
         var mn = ModNameOf(relic);
         if (string.IsNullOrEmpty(mn)) return false;
         return !GetModAllowed(characterTitle, mn);
@@ -178,6 +231,8 @@ internal static class RelicGuardService
     {
         public int Total;
         public readonly Dictionary<string, int> PerRarity = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The pack's distinct relics, for the panel's per-relic detail list.</summary>
+        public readonly List<RelicModel> Relics = new();
     }
 
     private static Dictionary<string, RelicPack>? _packs;
@@ -211,6 +266,7 @@ internal static class RelicGuardService
 
                     if (!map.TryGetValue(mod, out var mp)) { mp = new RelicPack(); map[mod] = mp; }
                     mp.Total++;
+                    mp.Relics.Add(r);
                     string rar;
                     try { rar = r.Rarity.ToString(); } catch { rar = "?"; }
                     mp.PerRarity.TryGetValue(rar, out int n);

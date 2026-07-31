@@ -50,7 +50,20 @@ internal static class CoopTest
     private static readonly StringBuilder _out = new();
     private static bool _isHost;
     private static string _role = "?";
-    private static bool _readySent, _launched, _done;
+    private static bool _readySent, _launched, _done, _staged;
+
+    /// <summary>
+    /// Individually blocked relic/card ids under test. The pack stays ALLOWED, so "victim gone but
+    /// pack-mates present" is what distinguishes per-item sync from the pack-level sync that already
+    /// shipped. Chosen deterministically (sorted by id) so BOTH peers derive the same list from
+    /// ModelDb and the client can assert on ids it was never locally told about.
+    /// </summary>
+    private static readonly List<string> _victimRelics = new();
+    private static readonly List<string> _victimCards = new();
+    /// <summary>The individually-blocked Ancient relic the host grants via the networked `relic`
+    /// command — exercises the RelicCmd.Obtain swap under lockstep.</summary>
+    private static string? _victimAncient;
+    private static string? _ancientEntry;
     private static string _step = "(not started)";
     private static DateTime _stepAt = DateTime.UtcNow;
 
@@ -66,15 +79,10 @@ internal static class CoopTest
             _role = fm == null ? "nofastmp" : (_isHost ? "host" : "join");
             W($"coop selftest armed (role={_role}, arg='{fm}')");
 
-            // HOST ONLY: set the block pre-lobby so it rides the host-config broadcast. The client
-            // leaves its local config empty on purpose — it must filter via the host override, which is
-            // exactly the sync path under test. (Just a string in a dict; no ModelDb needed yet.)
-            if (_isHost)
-            {
-                RelicGuardService.SetModAllowed(TargetChar, TargetMod, false);
-                W($"HOST pre-lobby: blocked '{TargetMod}' for '{TargetChar}' (will broadcast to client)");
-            }
-
+            // The individual blocks need ModelDb to resolve ids, so they are staged on the first tick
+            // that has it (StageBlocks) — still long before the client finishes booting, and therefore
+            // before the PlayerConnected broadcast that carries the host config. The client stages
+            // nothing: it must learn the blocks from the host override, which is the path under test.
             Poll();
         }
         catch (Exception e) { Log($"coop arm failed: {e.Message}"); }
@@ -110,6 +118,14 @@ internal static class CoopTest
             return;
         }
 
+        // Must happen before the client connects (the host broadcasts its config on PlayerConnected),
+        // and before either side is ready. ModelDb is populated during boot, well ahead of both.
+        if (!_staged)
+        {
+            if (ModelCount() == 0) { W("waiting for ModelDb before staging blocks…"); return; }
+            StageBlocks();
+        }
+
         if (!_readySent)
         {
             var screen = FindScreen(tree.Root);
@@ -122,6 +138,104 @@ internal static class CoopTest
     }
 
     private static void Step(string name) { _step = name; _stepAt = DateTime.UtcNow; W($"— {name}"); }
+
+    private static int ModelCount()
+    {
+        try
+        {
+            var f = typeof(ModelDb).GetField("_contentById", BindingFlags.NonPublic | BindingFlags.Static);
+            return (f?.GetValue(null) as System.Collections.IDictionary)?.Count ?? 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// Both roles compute the same victim ids from ModelDb; only the HOST actually blocks them. The
+    /// target pack is explicitly left ALLOWED on both sides so nothing but the per-item block can
+    /// remove the victims.
+    /// </summary>
+    private static void StageBlocks()
+    {
+        _staged = true;
+        try
+        {
+            // One victim per relic-adding mod, not two from a single mod: which mod's relics actually
+            // reach THIS run's grab bags is not knowable before the run starts (SlayTheUniverse's are
+            // character-scoped and never appear in an Ironclad bag), so spreading the victims is what
+            // gives the "victim gone / pack-mates kept" check something to bite on.
+            var byMod = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pool in ModelDb.AllRelicPools)
+                foreach (var r in pool.AllRelics)
+                {
+                    if (r == null || !RelicGuardService.IsModRelic(r)) continue;
+                    if (!GrabBagRarities.Contains(r.Rarity.ToString())) continue;
+                    var id = RelicGuardService.RelicIdOf(r);
+                    if (id.Length == 0) continue;
+                    string mn = RelicGuardService.ModNameOf(r);
+                    if (!byMod.TryGetValue(mn, out var l)) { l = new List<string>(); byMod[mn] = l; }
+                    l.Add(id);
+                }
+            foreach (var kv in byMod.OrderBy(k => k.Key, StringComparer.Ordinal))
+            {
+                if (kv.Value.Count < 2) continue;      // need a mate left over to prove it was per-item
+                kv.Value.Sort(StringComparer.Ordinal);
+                _victimRelics.Add(kv.Value[0]);
+                RelicGuardService.SetModAllowed(TargetChar, kv.Key, true); // every pack stays ALLOWED
+            }
+
+            // The Obtain path: the ancient relic the host grants below is itself made a victim, so the
+            // per-item block has to fire identically inside RelicCmd.Obtain on both peers.
+            var anc = FindAncientRelic();
+            if (anc != null)
+            {
+                _victimAncient = RelicGuardService.RelicIdOf(anc);
+                try { _ancientEntry = anc.Id.Entry; } catch { }
+                if (_victimAncient.Length > 0) _victimRelics.Add(_victimAncient);
+            }
+
+            if (CardGuardService.GetModCardPacks().TryGetValue(TargetMod, out var pack))
+            {
+                foreach (var c in pack.Cards)
+                {
+                    var id = CardGuardService.CardIdOf(c);
+                    if (id.Length > 0) _victimCards.Add(id);
+                }
+                _victimCards.Sort(StringComparer.Ordinal);
+                if (_victimCards.Count > 2) _victimCards.RemoveRange(2, _victimCards.Count - 2);
+            }
+
+            W($"victims (both roles derive these): relics=[{string.Join(", ", _victimRelics)}] cards=[{string.Join(", ", _victimCards)}]");
+
+            // Pack ALLOWED on both peers — otherwise the pack gate, not the per-item block, would be
+            // what removes the victims and the test would prove nothing new.
+            CardGuardService.SetModAllowed(TargetChar, TargetMod, true);
+
+            if (_isHost)
+            {
+                foreach (var id in _victimRelics) RelicGuardService.SetRelicAllowed(TargetChar, id, false);
+                foreach (var id in _victimCards) CardGuardService.SetCardAllowed(TargetChar, id, false);
+                W($"HOST staged individual blocks: {_victimRelics.Count} relic(s), {_victimCards.Count} card(s) "
+                  + $"for '{TargetChar}' (pack '{TargetMod}' left ALLOWED) — rides the host-config broadcast");
+            }
+            else W("JOIN staged nothing locally (must learn the blocks from the host override)");
+        }
+        catch (Exception e) { W("StageBlocks failed: " + e.Message); }
+    }
+
+    private static readonly HashSet<string> GrabBagRarities =
+        new(StringComparer.OrdinalIgnoreCase) { "Common", "Uncommon", "Rare", "Shop" };
+
+    /// <summary>
+    /// Did the effective (host-synced) config actually block the victims on THIS peer? On the client
+    /// this is the crux: it never set these locally, so a false here means the per-item maps did not
+    /// survive the wire.
+    /// </summary>
+    private static (bool relics, bool cards) OverrideApplied()
+    {
+        bool r = _victimRelics.Count > 0 && _victimRelics.All(id => !RelicGuardService.GetRelicAllowed(TargetChar, id));
+        bool c = _victimCards.Count > 0 && _victimCards.All(id => !CardGuardService.GetCardAllowed(TargetChar, id));
+        return (r, c);
+    }
 
     private static async Task HostPhase(RunManager run)
     {
@@ -140,7 +254,7 @@ internal static class CoopTest
             // via the built-in networked `relic` command (grants through RelicCmd.Obtain on BOTH peers).
             // Our Obtain swap must fire identically on each → both end with the substitute, not the
             // blocked relic, and stay converged.
-            string? ancientEntry = FindAncientEntry();
+            string? ancientEntry = _ancientEntry;
             if (ancientEntry != null)
             {
                 Step($"HOST grant blocked ancient relic '{ancientEntry}' (networked)");
@@ -158,9 +272,10 @@ internal static class CoopTest
 
             Step("HOST final snapshot");
             W($"HOST: FINAL = {Snapshot(run)}");
+            bool ok = Verdict(run, "HOST");
             await Shot("02_final");
             W("=== coop host done ===");
-            Flush(true);
+            Flush(ok);
         }
         catch (Exception e) { W("HOST exception: " + e); Flush(false); }
     }
@@ -178,9 +293,10 @@ internal static class CoopTest
             await Task.Delay(20000);
             Step("JOIN final snapshot");
             W($"JOIN: FINAL = {Snapshot(run)}");
+            bool ok = Verdict(run, "JOIN");
             await Shot("02_final");
             W("=== coop join done ===");
-            Flush(true);
+            Flush(ok);
         }
         catch (Exception e) { W("JOIN exception: " + e); Flush(false); }
     }
@@ -234,16 +350,20 @@ internal static class CoopTest
                 catch { }
             }
 
-            int bagTarget = 0;
-            foreach (var id in ids) if (!id.StartsWith("OWN:") && !id.StartsWith("ANC:") && id.IndexOf(TargetMod, StringComparison.OrdinalIgnoreCase) >= 0) bagTarget++;
+            // Count by RESOLVING the model, not by substring-matching the id: a mod's relic ids carry
+            // its own prefix (SlayTheUniverse relics are RELIC.ODDMELT-*), so matching on the assembly
+            // name would silently count zero and make the assertion vacuous.
+            var (victim, mate) = CountVictims(run);
 
-            return $"players={players.Count} inProgress=True items={ids.Count} bagTarget={bagTarget} obtainedTarget={obtainedTarget} modAncients={modAncients} sig={StableHash(ids):X8}";
+            return $"players={players.Count} inProgress=True items={ids.Count} victimInBag={victim} mateInBag={mate} "
+                 + $"obtainedTarget={obtainedTarget} modAncients={modAncients} sig={StableHash(ids):X8}";
         }
         catch (Exception e) { return "SNAPSHOT ERROR: " + e.Message; }
     }
 
-    /// <summary>Id.Entry of an Ancient-rarity relic from the blocked mod, for the `relic` console command.</summary>
-    private static string? FindAncientEntry()
+    /// <summary>An Ancient-rarity relic of <see cref="TargetMod"/> — granted directly by event code,
+    /// so it never enters a grab bag and only the RelicCmd.Obtain swap can stop it.</summary>
+    private static RelicModel? FindAncientRelic()
     {
         try
         {
@@ -253,11 +373,99 @@ internal static class CoopTest
                     if (r == null || !RelicGuardService.IsModRelic(r)) continue;
                     if (!string.Equals(RelicGuardService.ModNameOf(r), TargetMod, StringComparison.OrdinalIgnoreCase)) continue;
                     if (!string.Equals(r.Rarity.ToString(), "Ancient", StringComparison.OrdinalIgnoreCase)) continue;
-                    try { return r.Id.Entry; } catch { }
+                    return r;
                 }
         }
-        catch (Exception e) { W("FindAncientEntry failed: " + e.Message); }
+        catch (Exception e) { W("FindAncientRelic failed: " + e.Message); }
         return null;
+    }
+
+    /// <summary>Does any player hold the individually-blocked ancient? Must be false on BOTH peers.</summary>
+    private static bool HoldsVictimAncient(RunManager run)
+    {
+        if (_victimAncient == null) return false;
+        try
+        {
+            var state = run.State;
+            if (state == null) return false;
+            foreach (var p in state.Players)
+                foreach (var r in p.Relics)
+                {
+                    string id; try { id = r.Id.ToString() ?? ""; } catch { continue; }
+                    if (string.Equals(id, _victimAncient, StringComparison.OrdinalIgnoreCase)) return true;
+                }
+        }
+        catch { }
+        return false;
+    }
+
+    /// <summary>(individually-blocked relics still in a bag, same-pack relics still in a bag) across
+    /// every player bag plus the shared treasure bag.</summary>
+    private static (int victim, int mate) CountVictims(RunManager run)
+    {
+        int victim = 0, mate = 0;
+        try
+        {
+            var state = run.State;
+            if (state == null) return (0, 0);
+            foreach (var p in state.Players) CountBag(p.RelicGrabBag, ref victim, ref mate);
+            CountBag(state.SharedRelicGrabBag, ref victim, ref mate);
+        }
+        catch { }
+        return (victim, mate);
+    }
+
+    private static void CountBag(RelicGrabBag? bag, ref int victim, ref int mate)
+    {
+        try
+        {
+            var deques = bag?._deques;
+            if (deques == null) return;
+            foreach (var list in deques.Values)
+            {
+                if (list == null) continue;
+                foreach (var r in list)
+                {
+                    // Any mod's relic counts: victims are spread one-per-mod, so whichever mod's relics
+                    // this run's bag actually holds is the one that exercises the check.
+                    if (r == null || !RelicGuardService.IsModRelic(r)) continue;
+                    if (_victimRelics.Contains(RelicGuardService.RelicIdOf(r))) victim++; else mate++;
+                }
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Per-role pass/fail. Every field below is in the return value, not merely logged — a descriptor
+    /// that is printed but not asserted lets an obviously wrong value ship as RESULT: OK.
+    /// </summary>
+    private static bool Verdict(RunManager run, string role)
+    {
+        var (ovrRelics, ovrCards) = OverrideApplied();
+        var (victim, mate) = CountVictims(run);
+        bool alive = run.State != null && run.IsInProgress;
+        bool heldAncient = HoldsVictimAncient(run);
+
+        // The bag check only means something if this run's bags hold mod relics at all. Say so rather
+        // than let "victimInBag=0" read as proof when there was never anything there to remove.
+        bool bagApplicable = victim + mate > 0;
+
+        W($"{role}: assert host block in EFFECT here — relics={ovrRelics}, cards={ovrCards}");
+        W($"{role}: assert individually-blocked ancient NOT held after networked grant = {!heldAncient}"
+          + $"  [RelicCmd.Obtain swap under lockstep, ancient={_victimAncient ?? "(none)"}]");
+        if (bagApplicable)
+        {
+            W($"{role}: assert blocked relics gone from bags = {victim == 0} (victimInBag={victim})");
+            W($"{role}: assert same-pack relics KEPT = {mate > 0} (mateInBag={mate})  [proves per-item, not pack]");
+        }
+        else
+            W($"{role}: bag check INAPPLICABLE — this run's grab bags hold no mod relics at all "
+              + "(victim+mate=0); the bag path is covered by solo-verify instead.");
+        W($"{role}: assert session alive after room transition = {alive}");
+
+        bool bagOk = !bagApplicable || (victim == 0 && mate > 0);
+        return ovrRelics && ovrCards && !heldAncient && bagOk && alive;
     }
 
     private static void CollectBag(RelicGrabBag? bag, List<string> ids)

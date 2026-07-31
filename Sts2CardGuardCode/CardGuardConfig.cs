@@ -23,6 +23,10 @@ internal static class CardGuardConfig
         [JsonPropertyName("modBlock")] public Dictionary<string, List<string>> ModBlock { get; set; } = new();
         // Per-character (pool title) blocked relic-mod names. See RelicGuardService.
         [JsonPropertyName("relicModBlock")] public Dictionary<string, List<string>> RelicModBlock { get; set; } = new();
+        // Per-character blocked INDIVIDUAL mod card / relic ids (ModelId.ToString()). Absent in
+        // configs written before per-item blocking existed — the empty default reads as "none".
+        [JsonPropertyName("cardBlock")] public Dictionary<string, List<string>> CardBlock { get; set; } = new();
+        [JsonPropertyName("relicBlock")] public Dictionary<string, List<string>> RelicBlock { get; set; } = new();
     }
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
@@ -59,6 +63,14 @@ internal static class CardGuardConfig
                 foreach (var relicMod in relicMods)
                     RelicGuardService.SetModAllowed(character, relicMod, false);
 
+            foreach (var (character, cardIds) in model.CardBlock)
+                foreach (var cardId in cardIds)
+                    CardGuardService.SetCardAllowed(character, cardId, false);
+
+            foreach (var (character, relicIds) in model.RelicBlock)
+                foreach (var relicId in relicIds)
+                    RelicGuardService.SetRelicAllowed(character, relicId, false);
+
             Log.Info("config loaded.");
         }
         catch (Exception ex)
@@ -79,11 +91,15 @@ internal static class CardGuardConfig
                 if (chars.Count > 0) model.CrossBlock[from] = chars;
                 var mods = CardGuardService.GetBlockedMods(from);
                 if (mods.Count > 0) model.ModBlock[from] = mods;
+                var cards = CardGuardService.GetBlockedCards(from);
+                if (cards.Count > 0) model.CardBlock[from] = cards;
             }
             foreach (var title in RelicGuardService.GetConfiguredTitles())
             {
                 var relicMods = RelicGuardService.GetBlockedMods(title);
                 if (relicMods.Count > 0) model.RelicModBlock[title] = relicMods;
+                var relics = RelicGuardService.GetBlockedRelics(title);
+                if (relics.Count > 0) model.RelicBlock[title] = relics;
             }
             File.WriteAllText(ConfigPath(), JsonSerializer.Serialize(model, JsonOpts));
         }

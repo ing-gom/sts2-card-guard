@@ -22,8 +22,10 @@ internal static class CardGuardNet
     public const int Magic = 0x43475348;
 
     /// <summary>Wire-format version. Bump on any serialization change; mismatches are ignored.
-    /// v2 added the global relic-mod block list.</summary>
-    public const int Protocol = 2;
+    /// v2 added the global relic-mod block list. v3 added the individual card / relic block lists —
+    /// a v2 peer's config is discarded on receipt, so a mixed-version lobby simply runs unfiltered
+    /// rather than filtering differently on each side.</summary>
+    public const int Protocol = 3;
 
     /// <summary>Defensive cap on decoded collection sizes (guards a misaligned/foreign packet).</summary>
     private const int MaxEntries = 100_000;
@@ -71,6 +73,8 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
     public Dictionary<string, List<string>>? crossBlock;
     public Dictionary<string, List<string>>? modBlock;
     public Dictionary<string, List<string>>? relicModBlock;
+    public Dictionary<string, List<string>>? cardBlock;
+    public Dictionary<string, List<string>>? relicBlock;
 
     // Host sends directly to each peer; no onward relay needed.
     public readonly bool ShouldBroadcast => false;
@@ -85,6 +89,8 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
         CardGuardNet.WriteMap(writer, crossBlock);
         CardGuardNet.WriteMap(writer, modBlock);
         CardGuardNet.WriteMap(writer, relicModBlock);
+        CardGuardNet.WriteMap(writer, cardBlock);
+        CardGuardNet.WriteMap(writer, relicBlock);
     }
 
     public void Deserialize(PacketReader reader)
@@ -94,6 +100,8 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
         crossBlock = CardGuardNet.ReadMap(reader);
         modBlock = CardGuardNet.ReadMap(reader);
         relicModBlock = CardGuardNet.ReadMap(reader);
+        cardBlock = CardGuardNet.ReadMap(reader);
+        relicBlock = CardGuardNet.ReadMap(reader);
     }
 }
 

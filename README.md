@@ -47,7 +47,7 @@ blocked character never even appears as an option.
 
 ## In-game panel
 
-The character-select screen gets a **Card Pack Filter** button (bottom-right). It opens a full-screen
+The character-select screen gets a **Card / Relic Filter** button (bottom-right). It opens a full-screen
 panel (no ModConfig dependency):
 
 - **Left** — pick the character you are configuring for (base **and** custom characters).
@@ -62,6 +62,26 @@ character. Custom characters appear only in the character section (one checkbox 
 
 Settings persist to `Settings/card_guard_config.txt` (JSON) next to the mod DLL and apply from the
 first screen on the next launch. English, Korean and Simplified Chinese are supported (follows the game language).
+
+## Per-item blocking (v0.5.0)
+
+A whole pack is often too blunt — usually only a handful of a mod's cards or relics are unwanted.
+Press **Detail** next to any mod pack to open its contents and tick them one by one.
+
+- **Cards** — hovering a row shows the **real card**, rendered by the game itself, so you can see the
+  art, cost and text of exactly what you are about to block.
+- **Relics** — every row carries its icon.
+- A search box and **Allow all / Block all** keep long lists (200+ cards) workable.
+
+Only mod-added content is individually blockable; base-game cards and relics stay all-or-nothing
+through their pack. A mod that injects cards into a *base* character's pool gets a Detail button on
+that character's row, so those cards are reachable too.
+
+**The pack checkbox and its detail list are one setting.** Unchecking a pack switches every item in it
+off; switching the last item off blocks the pack. When only part of a pack is allowed, the checkbox
+shows a partial mark and the row reports the tally, e.g. `SlayTheUniverse — 117 relics (115 on / 2 off)`.
+Keeping the pack flag in step matters beyond cosmetics: that flag also gates content the detail list
+cannot enumerate — a character mod's shared colorless/curse cards, and its Ancient beings.
 
 ## Debug console
 

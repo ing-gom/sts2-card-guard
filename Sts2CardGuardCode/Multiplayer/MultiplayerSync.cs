@@ -38,6 +38,8 @@ internal static class MultiplayerSync
     private static Dictionary<string, List<string>>? _hostCross;
     private static Dictionary<string, List<string>>? _hostMod;
     private static Dictionary<string, List<string>>? _hostRelicMod;
+    private static Dictionary<string, List<string>>? _hostCard;
+    private static Dictionary<string, List<string>>? _hostRelic;
 
     /// <summary>
     /// Called when a <see cref="StartRunLobby"/> is constructed (host or client). Resets per-lobby
@@ -57,6 +59,8 @@ internal static class MultiplayerSync
                 _hostCross = null;
                 _hostMod = null;
                 _hostRelicMod = null;
+                _hostCard = null;
+                _hostRelic = null;
 
                 if (!ReferenceEquals(_net, net))
                 {
@@ -98,8 +102,8 @@ internal static class MultiplayerSync
     {
         try
         {
-            var (cross, mod) = CardGuardService.SnapshotLocalBlocks();
-            var relicMod = RelicGuardService.SnapshotLocalBlocks();
+            var (cross, mod, card) = CardGuardService.SnapshotLocalBlocks();
+            var (relicMod, relic) = RelicGuardService.SnapshotLocalBlocks();
             var msg = new CardGuardConfigMessage
             {
                 magic = CardGuardNet.Magic,
@@ -107,9 +111,11 @@ internal static class MultiplayerSync
                 crossBlock = cross,
                 modBlock = mod,
                 relicModBlock = relicMod,
+                cardBlock = card,
+                relicBlock = relic,
             };
             net.SendMessage(msg);
-            Log.Info($"host config broadcast ({cross.Count} char-block set(s), {mod.Count} mod-block set(s), {relicMod.Count} relic-mod set(s)).");
+            Log.Info($"host config broadcast ({cross.Count} char-block set(s), {mod.Count} mod-block set(s), {relicMod.Count} relic-mod set(s), {card.Count} card-block set(s), {relic.Count} relic-block set(s)).");
         }
         catch (Exception ex) { Log.Warn($"SendConfigToAll failed: {ex.Message}"); }
     }
@@ -130,6 +136,8 @@ internal static class MultiplayerSync
                 _hostCross = msg.crossBlock ?? new Dictionary<string, List<string>>();
                 _hostMod = msg.modBlock ?? new Dictionary<string, List<string>>();
                 _hostRelicMod = msg.relicModBlock ?? new Dictionary<string, List<string>>();
+                _hostCard = msg.cardBlock ?? new Dictionary<string, List<string>>();
+                _hostRelic = msg.relicBlock ?? new Dictionary<string, List<string>>();
                 _hostConfigReceived = true;
             }
             // Acknowledge so the host knows it may safely enable filtering for the run.
@@ -182,12 +190,19 @@ internal static class MultiplayerSync
                 case NetGameType.Client:
                 {
                     bool have;
-                    Dictionary<string, List<string>>? cross, mod, relicMod;
-                    lock (_gate) { have = _hostConfigReceived; cross = _hostCross; mod = _hostMod; relicMod = _hostRelicMod; }
+                    Dictionary<string, List<string>>? cross, mod, relicMod, card, relic;
+                    lock (_gate)
+                    {
+                        have = _hostConfigReceived;
+                        cross = _hostCross; mod = _hostMod; relicMod = _hostRelicMod;
+                        card = _hostCard; relic = _hostRelic;
+                    }
                     if (have)
                     {
-                        CardGuardService.ActivateMpOverride(cross!, mod!);
-                        RelicGuardService.ActivateMpOverride(relicMod ?? new Dictionary<string, List<string>>());
+                        CardGuardService.ActivateMpOverride(cross!, mod!, card ?? new Dictionary<string, List<string>>());
+                        RelicGuardService.ActivateMpOverride(
+                            relicMod ?? new Dictionary<string, List<string>>(),
+                            relic ?? new Dictionary<string, List<string>>());
                         Log.Info("MP lock-in (client): applying host config (own settings ignored this run).");
                     }
                     else

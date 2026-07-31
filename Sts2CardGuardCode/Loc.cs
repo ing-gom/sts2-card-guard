@@ -24,7 +24,7 @@ internal static class Loc
         ["title"] = "Card / Relic Pack Filter",
         ["enable"] = "Enable",
         ["colorless"] = "Allow colorless",
-        ["hint"] = "Default: all card packs are allowed. Pick a character on the left, then UNCHECK a pack on the right to block it for that character.",
+        ["hint"] = "Default: all card packs are allowed. Pick a character on the left, then UNCHECK a pack on the right to block it for that character. Press Detail to block single cards of a mod pack.",
         ["configure"] = "Configure character",
         ["sec_char"] = "Character card packs",
         ["sec_mod"] = "Mod card packs",
@@ -34,10 +34,18 @@ internal static class Loc
         ["mod_colorless_fmt"] = "  ({0} colorless)",
         ["tab_cards"] = "Cards",
         ["tab_relics"] = "Relics",
-        ["relic_hint"] = "Pick a character on the left, then UNCHECK a mod's relics to block them for that character. Base-game relics are never affected.",
+        ["relic_hint"] = "Pick a character on the left, then UNCHECK a mod's relics to block them for that character. Press Detail to block single relics. Base-game relics are never affected.",
         ["relic_sec"] = "Mod relic packs",
         ["relics"] = "relics",
         ["no_relic_mods"] = "(no relic-adding mods)",
+        ["detail"] = "Detail ▸",
+        ["back"] = "◂ Back",
+        ["search"] = "Search",
+        ["all_on"] = "Allow all",
+        ["all_off"] = "Block all",
+        ["counts_fmt"] = "   ({0} on / {1} off)",
+        ["no_items"] = "(nothing matches)",
+        ["pack_off_note"] = "This whole pack is currently blocked — re-check the pack to make these individual settings take effect.",
     };
 
     private static readonly Dictionary<string, string> Ko = new()
@@ -46,7 +54,7 @@ internal static class Loc
         ["title"] = "카드/유물 팩 필터",
         ["enable"] = "사용",
         ["colorless"] = "무색 허용",
-        ["hint"] = "기본: 모든 카드팩 허용. 왼쪽에서 캐릭터를 고르고, 오른쪽에서 차단할 카드팩의 체크를 해제하세요.",
+        ["hint"] = "기본: 모든 카드팩 허용. 왼쪽에서 캐릭터를 고르고, 오른쪽에서 차단할 카드팩의 체크를 해제하세요. 모드 카드팩은 [상세]로 카드 한 장씩 차단할 수 있습니다.",
         ["configure"] = "설정할 캐릭터",
         ["sec_char"] = "캐릭터 카드팩",
         ["sec_mod"] = "모드 카드팩",
@@ -56,10 +64,18 @@ internal static class Loc
         ["mod_colorless_fmt"] = "  (무색 {0}장)",
         ["tab_cards"] = "카드",
         ["tab_relics"] = "유물",
-        ["relic_hint"] = "왼쪽에서 캐릭터를 고르고, 오른쪽에서 차단할 모드 유물의 체크를 해제하세요(그 캐릭터에만 적용). 기본 유물은 영향받지 않습니다.",
+        ["relic_hint"] = "왼쪽에서 캐릭터를 고르고, 오른쪽에서 차단할 모드 유물의 체크를 해제하세요(그 캐릭터에만 적용). [상세]로 유물 하나씩 차단할 수 있습니다. 기본 유물은 영향받지 않습니다.",
         ["relic_sec"] = "모드 유물팩",
         ["relics"] = "개",
         ["no_relic_mods"] = "(유물 추가 모드 없음)",
+        ["detail"] = "상세 ▸",
+        ["back"] = "◂ 뒤로",
+        ["search"] = "검색",
+        ["all_on"] = "전체 허용",
+        ["all_off"] = "전체 차단",
+        ["counts_fmt"] = "   (허용 {0} / 차단 {1})",
+        ["no_items"] = "(검색 결과 없음)",
+        ["pack_off_note"] = "이 팩은 현재 통째로 차단된 상태입니다 — 팩 체크를 다시 켜야 아래 개별 설정이 적용됩니다.",
     };
 
     private static readonly Dictionary<string, string> Zh = new()
@@ -68,7 +84,7 @@ internal static class Loc
         ["title"] = "卡牌/遗物包过滤器",
         ["enable"] = "启用",
         ["colorless"] = "允许无色卡",
-        ["hint"] = "默认：允许所有卡包。在左侧选择角色，然后在右侧取消勾选某个卡包即可为该角色屏蔽。",
+        ["hint"] = "默认：允许所有卡包。在左侧选择角色，然后在右侧取消勾选某个卡包即可为该角色屏蔽。模组卡包可点击[详细]逐张屏蔽。",
         ["configure"] = "选择角色",
         ["sec_char"] = "角色卡包",
         ["sec_mod"] = "模组卡包",
@@ -78,10 +94,18 @@ internal static class Loc
         ["mod_colorless_fmt"] = "  (无色 {0} 张)",
         ["tab_cards"] = "卡牌",
         ["tab_relics"] = "遗物",
-        ["relic_hint"] = "在左侧选择角色，然后在右侧取消勾选某个模组的遗物即可为该角色屏蔽。基础遗物不受影响。",
+        ["relic_hint"] = "在左侧选择角色，然后在右侧取消勾选某个模组的遗物即可为该角色屏蔽。可点击[详细]逐件屏蔽。基础遗物不受影响。",
         ["relic_sec"] = "模组遗物包",
         ["relics"] = "件",
         ["no_relic_mods"] = "(无添加遗物的模组)",
+        ["detail"] = "详细 ▸",
+        ["back"] = "◂ 返回",
+        ["search"] = "搜索",
+        ["all_on"] = "全部允许",
+        ["all_off"] = "全部屏蔽",
+        ["counts_fmt"] = "   (允许 {0} / 屏蔽 {1})",
+        ["no_items"] = "(无匹配结果)",
+        ["pack_off_note"] = "该卡包目前被整体屏蔽 — 需重新勾选卡包，下面的单项设置才会生效。",
     };
 
     private static readonly Dictionary<string, Dictionary<string, string>> Langs = new()
@@ -125,7 +149,32 @@ internal static class Loc
         catch { /* table not present yet — T() falls back to the in-code dict */ }
     }
 
-    /// <summary>Localized text for <paramref name="key"/> — from the loc table, falling back to the in-code dict.</summary>
+    /// <summary>
+    /// Localized FORMAT string applied with <paramref name="args"/>.
+    ///
+    /// Deliberately bypasses the loc table, unlike <see cref="T"/>: the table goes through
+    /// <c>LocString.GetFormattedText()</c>, and SmartFormat reads a lone <c>{0}</c> as a selector on
+    /// the LocString's argument bag — rendering it as
+    /// <c>System.Collections.Generic.Dictionary`2[System.String,System.Object]</c> rather than
+    /// leaving the placeholder for <c>string.Format</c>. It does not throw, so <see cref="T"/>'s
+    /// fallback never engages and the corruption reaches the screen. (Two placeholders happen to
+    /// throw and fall back correctly, which makes the bug look intermittent.)
+    ///
+    /// The in-code dictionaries are the source of these strings anyway — <see cref="Apply"/> only
+    /// copies them into the table — so formatting from them loses no translation.
+    /// </summary>
+    public static string F(string key, params object[] args)
+    {
+        var d = Dict();
+        string fmt = d.TryGetValue(key, out var v) ? v
+                   : En.TryGetValue(key, out var e) ? e
+                   : key;
+        try { return string.Format(fmt, args); }
+        catch { return fmt; }
+    }
+
+    /// <summary>Localized text for <paramref name="key"/> — from the loc table, falling back to the in-code dict.
+    /// For strings with <c>{0}</c>-style placeholders use <see cref="F"/> instead.</summary>
     public static string T(string key)
     {
         try
