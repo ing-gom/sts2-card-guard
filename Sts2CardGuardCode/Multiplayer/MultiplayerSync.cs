@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Multiplayer.Game.Lobby;
 
@@ -81,13 +82,58 @@ internal static class MultiplayerSync
             {
                 // Cover peers already connected at ctor time, then keep new joiners covered.
                 SendConfigToAll(net);
-                lobby.PlayerConnected += _ => SendConfigToAll(net);
+                SubscribePlayerConnected(lobby);
             }
             // Client: nothing to do proactively — the host pushes config on our PlayerConnected.
 
             Log.Info($"multiplayer lobby detected (type={net.Type}); host-config sync armed.");
         }
         catch (Exception ex) { Log.Warn($"OnLobbyCreated failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Subscribe to <c>StartRunLobby.PlayerConnected</c> without naming its parameter type.
+    ///
+    /// v0.110 renamed <c>LobbyPlayer</c> to <c>StartRunLobbyPlayer</c>, and the event is
+    /// <c>Action&lt;TPlayer&gt;</c> on both. A lambda here would bake whichever name this DLL was
+    /// compiled against into <see cref="OnLobbyCreated" />, so the JIT threw "Could not load type
+    /// … LobbyPlayer" on the other branch — taking the entire ctor hook down with it, which is
+    /// exactly how host-config sync died on the 110 beta. Binding through the event's own delegate
+    /// type keeps one published DLL working on both `public` and `public-beta`: relaxed delegate
+    /// binding lets a handler declared with <c>object</c> satisfy <c>Action&lt;TPlayer&gt;</c> for
+    /// any reference TPlayer.
+    ///
+    /// If this fails we degrade safely rather than desync: a late joiner simply never receives the
+    /// host config, so it never acks, and <see cref="LockInForRun" /> turns filtering OFF for the
+    /// run (pass-through) instead of filtering with un-synced config.
+    /// </summary>
+    private static void SubscribePlayerConnected(StartRunLobby lobby)
+    {
+        try
+        {
+            var evt = lobby.GetType().GetEvent("PlayerConnected", BindingFlags.Public | BindingFlags.Instance);
+            var handlerType = evt?.EventHandlerType;
+            var handler = typeof(MultiplayerSync).GetMethod(nameof(OnPeerConnected), BindingFlags.NonPublic | BindingFlags.Static);
+            if (evt == null || handlerType == null || handler == null)
+            {
+                Log.Warn("StartRunLobby.PlayerConnected not found on this game build — peers joining after lobby creation will not receive host config (filtering stays off for the run).");
+                return;
+            }
+            evt.AddEventHandler(lobby, Delegate.CreateDelegate(handlerType, null, handler));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"could not subscribe to PlayerConnected ({ex.Message}) — peers joining after lobby creation will not receive host config (filtering stays off for the run).");
+        }
+    }
+
+    /// <summary>Late joiner appeared — re-broadcast. Reads the net service from the field rather
+    /// than a closure, so the handler signature stays version-independent.</summary>
+    private static void OnPeerConnected(object? _)
+    {
+        INetGameService? net;
+        lock (_gate) net = _net;
+        if (net != null) SendConfigToAll(net);
     }
 
     private static void UnregisterFrom(INetGameService? net)

@@ -450,7 +450,7 @@ internal static class CardGuardService
             // Colorful Philosophers event, offering a reward drawn ENTIRELY from another, blocked
             // character). Rather than pass the foreign cards through, substitute allowed cards so
             // the block holds without emptying the pool (which would crash the RNG).
-            var sub = TryBuildSubstitute(player, currentPool);
+            var sub = TryBuildSubstitute(player, currentPool, materialized);
             if (sub.Count > 0)
             {
                 Log.Info($"all {materialized.Count} candidates blocked (char={currentPool.Title}); substituted {sub.Count} allowed card(s)");
@@ -473,25 +473,44 @@ internal static class CardGuardService
     /// if no other character is allowed do we use the current character's own cards, so the pool
     /// is never emptied (which would crash the RNG). Deterministic (fixed pool + card order) so
     /// networked peers substitute identically.
+    ///
+    /// The substitute is drawn from exactly ONE allowed character pool. Every vanilla caller builds
+    /// its candidate set from a single pool (Colorful Philosophers offers 3 cards from the picked
+    /// character; Kaleidoscope draws one card per pool), so concatenating every allowed pool made
+    /// the replacement reward a class mash-up that no vanilla screen ever shows ("混池，即未被屏蔽
+    /// 的职业全部混在一起"). Which pool is picked is derived from the blocked source pool's title, so
+    /// a given blocked character always maps to the same stand-in — stable across peers, saves and
+    /// platforms (no RNG consumed, which would also desync vanilla parity).
     /// </summary>
-    private static List<CardModel> TryBuildSubstitute(Player? player, CardPoolModel currentPool)
+    private static List<CardModel> TryBuildSubstitute(Player? player, CardPoolModel currentPool, List<CardModel> blocked)
     {
         var result = new List<CardModel>();
         if (player == null) return result;
         string currentTitle = currentPool.Title ?? string.Empty;
         try
         {
-            // 1) Allowed OTHER-character cards first (keep the cross-character flavor).
+            // 1) Allowed OTHER-character pools (keep the cross-character flavor), single pool only.
+            var candidates = new List<CardPoolModel>();
             foreach (var pool in player.UnlockState.CharacterCardPools)
             {
                 if (pool == null || pool.IsColorless) continue;
                 string t = pool.Title ?? string.Empty;
                 if (t.Equals(currentTitle, StringComparison.OrdinalIgnoreCase)) continue; // own handled below
                 if (!GetCrossAllowed(currentTitle, t)) continue;                          // blocked character
-                foreach (var c in pool.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint))
-                    if (c != null && IsAllowed(c, currentPool)) result.Add(c);
+                candidates.Add(pool);
             }
-            if (result.Count > 0) return result;
+
+            if (candidates.Count > 0)
+            {
+                int start = StableIndex(BlockedSourceTitle(blocked), candidates.Count);
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    var pool = candidates[(start + i) % candidates.Count];
+                    foreach (var c in pool.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint))
+                        if (c != null && IsAllowed(c, currentPool)) result.Add(c);
+                    if (result.Count > 0) return result; // one pool is enough — never mix classes
+                }
+            }
 
             // 2) Fall back to the current character's own cards (never empty the pool).
             foreach (var c in currentPool.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint))
@@ -499,6 +518,54 @@ internal static class CardGuardService
         }
         catch { }
         return result;
+    }
+
+    /// <summary>Pool title the blocked candidates came from — the substitute's selection key.</summary>
+    private static string BlockedSourceTitle(List<CardModel> blocked)
+    {
+        foreach (var c in blocked)
+        {
+            if (c == null) continue;
+            try { var p = c.Pool; if (p != null) return p.Title ?? string.Empty; }
+            catch { }
+        }
+        return string.Empty;
+    }
+
+    /// <summary>FNV-1a over <paramref name="key"/>, reduced to [0, count). Hand-rolled instead of
+    /// <c>string.GetHashCode</c>, which is randomized per process and would differ between peers.</summary>
+    private static int StableIndex(string key, int count)
+    {
+        if (count <= 1) return 0;
+        uint h = 2166136261u;
+        foreach (char ch in key ?? string.Empty)
+        {
+            h ^= char.ToLowerInvariant(ch);
+            h *= 16777619u;
+        }
+        return (int)(h % (uint)count);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="targetPool"/> still offers at least one card that survives the filter
+    /// for <paramref name="player"/>'s current character. Lets an option that picks a whole foreign
+    /// pool (the Colorful Philosophers event) be hidden when individual card blocks have emptied that
+    /// pool, instead of letting the choice through and having <see cref="TryBuildSubstitute"/> quietly
+    /// hand back some other character's cards.
+    /// </summary>
+    public static bool HasAnyAllowedCard(Player? player, CardPoolModel? targetPool)
+    {
+        if (_mpPassThrough) return true;
+        if (player == null || targetPool == null) return true;
+        var currentPool = TryGetCurrentPool(player);
+        if (currentPool == null) return true;
+        try
+        {
+            foreach (var c in targetPool.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint))
+                if (c != null && IsAllowed(c, currentPool)) return true;
+        }
+        catch { return true; }
+        return false;
     }
 
     /// <summary>

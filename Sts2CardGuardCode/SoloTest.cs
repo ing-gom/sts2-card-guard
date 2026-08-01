@@ -141,12 +141,13 @@ internal static class SoloTest
             bool okCardOne = RunIndividualCardTest(player);
             bool okCfg = RunConfigRoundTripTest(player);
             bool okLink = RunPackLinkageTest(player);
+            bool okPhil = await RunPhilosophersOptionTest(player);
             await ShotPanel(player);
 
-            bool ok = okBag && okRelicOne && okCardOne && okCfg && okLink && _hoverOk;
+            bool ok = okBag && okRelicOne && okCardOne && okCfg && okLink && okPhil && _hoverOk;
             W($"=== summary: grabbag/ancient={okBag}, individual-relic={okRelicOne}, "
               + $"individual-card={okCardOne}, config-roundtrip={okCfg}, pack-linkage={okLink}, "
-              + $"hover-preview={_hoverOk} ===");
+              + $"philosophers={okPhil}, hover-preview={_hoverOk} ===");
 
             await Shot("2_final");
             W("=== solo test done ===");
@@ -596,6 +597,107 @@ internal static class SoloTest
             await Task.Delay(400);
         }
         catch (Exception e) { W($"panel screenshots failed: {e.Message}"); }
+    }
+
+    /// <summary>
+    /// Colorful Philosophers picks a FOREIGN character pool before any card exists, so its options
+    /// bypass the card filter and need their own hook. Regression for the reported "a blocked MOD
+    /// character is still offered, and picking it hands back a mix of the classes you did NOT block":
+    ///   1. run the event with nothing blocked → record which pools it offers (baseline),
+    ///   2. block one of them → the same event must drop that option and keep the others,
+    ///   3. filtering that pool's cards must substitute from exactly ONE other pool, never a mix.
+    /// The event Rng is seeded from the run seed + event id, so both runs consider the same candidate
+    /// set — the only difference is our filter. A MOD pool is preferred as the target, since that is
+    /// the case that regressed (RitsuLib appends mod pools to the event's candidate order).
+    /// </summary>
+    private static async Task<bool> RunPhilosophersOptionTest(Player player)
+    {
+        Step("philosophers: baseline options (nothing blocked)");
+        string charTitle = player.Character?.CardPool?.Title ?? "";
+        if (charTitle.Length == 0) { W("no current card pool — skipping."); return true; }
+
+        var baseline = await OfferedPools(player);
+        if (baseline == null) { W("assert: could not run the event — FAIL"); return false; }
+        W($"baseline options: {baseline.Count} [{string.Join(", ", baseline.Select(p => p.Title))}]");
+        if (baseline.Count < 2)
+        { W("assert: fewer than 2 foreign pools offered — cannot exercise the option filter, SKIP."); return true; }
+
+        var baseAsm = typeof(EventModel).Assembly;
+        var target = baseline.FirstOrDefault(p => p.GetType().Assembly != baseAsm) ?? baseline[0];
+        string targetTitle = target.Title ?? "";
+        bool isMod = target.GetType().Assembly != baseAsm;
+        W($"target pool: {targetTitle} (mod-added={isMod})");
+
+        bool ok = true;
+        void Check(string what, bool cond)
+        {
+            W($"assert: {what} = {cond}");
+            if (!cond) ok = false;
+        }
+
+        bool wasBlocked = !CardGuardService.GetCrossAllowed(charTitle, targetTitle);
+        try
+        {
+            Step($"philosophers: block '{targetTitle}' for {charTitle}, re-run the event");
+            CardGuardService.SetCrossAllowed(charTitle, targetTitle, false);
+            var filtered = await OfferedPools(player);
+            if (filtered == null) { W("assert: could not re-run the event — FAIL"); return false; }
+            W($"filtered options: {filtered.Count} [{string.Join(", ", filtered.Select(p => p.Title))}]");
+
+            Check($"blocked pool '{targetTitle}' is no longer offered",
+                  !filtered.Any(p => string.Equals(p.Title, targetTitle, StringComparison.OrdinalIgnoreCase)));
+            Check("the other options survive",
+                  filtered.Count == baseline.Count - baseline.Count(p => string.Equals(p.Title, targetTitle, StringComparison.OrdinalIgnoreCase)));
+
+            Step("philosophers: substitute must come from ONE pool, not a mix");
+            var blockedCards = target
+                .GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint)
+                .Where(c => c != null).ToList();
+            if (blockedCards.Count == 0)
+            {
+                W("assert: blocked pool has no unlocked cards — SKIP substitute check.");
+            }
+            else
+            {
+                var sub = CardGuardService.Filter(blockedCards, player).ToList();
+                var titles = sub.Select(c => { try { return c.Pool?.Title ?? ""; } catch { return ""; } })
+                                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                W($"substitute: {sub.Count} card(s) from [{string.Join(", ", titles)}]");
+                Check("substitute is not the blocked pool",
+                      !titles.Any(t => string.Equals(t, targetTitle, StringComparison.OrdinalIgnoreCase)));
+                Check("substitute draws from a single character pool", titles.Count == 1);
+            }
+        }
+        finally
+        {
+            CardGuardService.SetCrossAllowed(charTitle, targetTitle, !wasBlocked);
+        }
+
+        Step("philosophers verdict");
+        return ok;
+    }
+
+    /// <summary>
+    /// Run a fresh Colorful Philosophers instance for <paramref name="player"/> and report the
+    /// character pool behind each surviving option. A mutable clone is used because
+    /// <c>BeginEvent</c> refuses an instance that already has an owner. Null on failure.
+    /// </summary>
+    private static async Task<List<CardPoolModel>?> OfferedPools(Player player)
+    {
+        try
+        {
+            var ev = (ColorfulPhilosophers)ModelDb.Event<ColorfulPhilosophers>().MutableClone();
+            await ev.BeginEvent(player, isPreFinished: false);
+            var pools = new List<CardPoolModel>();
+            foreach (var opt in ev.CurrentOptions)
+            {
+                var p = Patches.ColorfulPhilosophers_Patch.ResolveTargetPool(opt);
+                if (p != null) pools.Add(p);
+                else W($"  (option '{opt?.TextKey}' has no resolvable pool)");
+            }
+            return pools;
+        }
+        catch (Exception e) { W($"philosophers: event run failed: {e.Message}"); return null; }
     }
 
     /// <summary>Set by <see cref="RunHoverPreviewTest"/>; folded into the overall verdict.</summary>

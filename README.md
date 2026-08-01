@@ -40,10 +40,13 @@ is untouched. The current character is read from `player.Character.CardPool` —
 **Cross-character sources.** Relics and events that deliberately hand you *another* character's cards
 — **Kaleidoscope**, **Prismatic Gem**, **Splash**, and the **Colorful Philosophers** event — all
 draw their cards through the pool hooks above, so a blocked character's cards are filtered there too.
-When a fully-blocked pool would be emptied, an *allowed other* character's cards are substituted
-first (falling back to your own only if no other is allowed), so the Kaleidoscope no longer surfaces
-your own class. The Colorful Philosophers event also has its **choice list** filtered directly, so a
-blocked character never even appears as an option.
+When a fully-blocked pool would be emptied, cards from **one** allowed other character are
+substituted (falling back to your own only if no other is allowed), so the Kaleidoscope no longer
+surfaces your own class and the replacement still reads as a single class instead of a mash-up of
+every class you left allowed. The Colorful Philosophers event also has its **choice list** filtered
+directly: each option is matched against the card pool it actually offers, so mod-added characters
+are hidden too — RitsuLib extends this event with them — as is a character whose cards you have
+blocked one by one.
 
 ## In-game panel
 
