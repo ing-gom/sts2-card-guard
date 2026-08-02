@@ -20,14 +20,17 @@ namespace Sts2CardGuard.Patches;
 /// A blocked option is RETARGETED, not dropped: the event rolls a fixed number of choices before we
 /// see them, so merely removing a blocked option shrank the event ("战士、猎手、MOD角色 → only the
 /// first two show") and an all-blocked roll left the event with nothing but Skip. Instead each
-/// blocked option is redirected to an allowed character pool that is not already offered — the
+/// blocked option is redirected to an allowed character pool that is not already offered: the
 /// <c>CardPoolModel</c> captured in the option's <c>OnChosen</c> closure (<c>() =&gt;
-/// OfferRewards(cardPool)</c>) is swapped and the option's <c>TextKey</c> is rebaked to the stand-in
-/// pool's EnergyColorName, so the label and the reward stay in sync. Base-game pools are preferred
-/// as stand-ins (their option strings always exist); which pool is picked is derived from the
-/// blocked pool's title via the same stable hash the card substitute uses, so a given blocked
-/// character always maps to the same stand-in on every peer, save and platform. Only when no
-/// allowed pool remains (or the option can't be rewritten) is it dropped as before — the game
+/// OfferRewards(cardPool)</c>) is swapped to the stand-in and the option is REBUILT through the
+/// public <c>EventOption</c> constructor with the stand-in's text key, so the game derives the
+/// button's title and description itself and they cannot drift from the reward
+/// (see <see cref="TryBuildRetargeted" /> — editing <c>TextKey</c> in place does not relabel).
+/// Base-game pools are preferred as stand-ins (their option strings always exist) and a pool with
+/// no option string is skipped; which pool is picked is derived from the blocked pool's title via
+/// the same stable hash the card substitute uses, so a given blocked character always maps to the
+/// same stand-in on every peer, save and platform. Only when no usable stand-in remains is the
+/// option dropped as before — the game
 /// handles a zero-option event by ending it (<c>SetEventState</c> sets <c>_isFinished</c>), so
 /// that fallback is safe. The multiplayer pass-through is honoured throughout: with filtering
 /// disabled nothing is blocked, so options are never touched.
@@ -48,16 +51,6 @@ internal static class ColorfulPhilosophers_Patch
 {
     /// <summary><c>EventOption.OnChosen</c> — private get-only auto-property holding the option's action.</summary>
     private static readonly PropertyInfo? OnChosenProp = AccessTools.Property(typeof(EventOption), "OnChosen");
-
-    /// <summary><c>EventOption.TextKey</c> writer — property setter, plain field, or auto-property
-    /// backing field, whichever the game version exposes. Null when none is found, in which case a
-    /// blocked option cannot be relabelled and is dropped instead of retargeted.</summary>
-    private static readonly PropertyInfo? TextKeyProp = AccessTools.Property(typeof(EventOption), "TextKey");
-    private static readonly FieldInfo? TextKeyField =
-        AccessTools.Field(typeof(EventOption), "TextKey")
-        ?? AccessTools.Field(typeof(EventOption), "<TextKey>k__BackingField");
-
-    private static bool CanRewriteTextKey => TextKeyProp?.CanWrite == true || TextKeyField != null;
 
     private static void Postfix(EventModel __instance, ref IReadOnlyList<EventOption> __result)
     {
@@ -117,19 +110,21 @@ internal static class ColorfulPhilosophers_Patch
             {
                 if (!blocked) { kept.Add(opt); continue; }
 
-                if (pool != null && candidates.Count > 0 && CanRewriteTextKey)
+                // Walk the stand-ins in stable-index order until one produces a usable option: a
+                // candidate is discarded (not silently kept) when it has no option string of its
+                // own, so a rejected pool never gets tried again for a later blocked option either.
+                EventOption? rebuilt = null;
+                while (pool != null && candidates.Count > 0)
                 {
                     int idx = CardGuardService.StableIndex(pool.Title ?? string.Empty, candidates.Count);
                     var standIn = candidates[idx];
-                    if (TryRetarget(opt, pool, standIn))
-                    {
-                        candidates.RemoveAt(idx);
-                        kept.Add(opt);
-                        retargeted++;
-                        continue;
-                    }
+                    candidates.RemoveAt(idx);
+                    rebuilt = TryBuildRetargeted(__instance, opt, pool, standIn);
+                    if (rebuilt != null) break;
                 }
-                dropped++;
+
+                if (rebuilt != null) { kept.Add(rebuilt); retargeted++; }
+                else dropped++;
             }
 
             if (retargeted > 0 || dropped > 0)
@@ -178,50 +173,62 @@ internal static class ColorfulPhilosophers_Patch
     }
 
     /// <summary>
-    /// Redirect <paramref name="opt"/> from <paramref name="from"/> to <paramref name="standIn"/>:
-    /// swap the pool captured in the OnChosen closure, then rebake the TextKey suffix to the
-    /// stand-in's EnergyColorName (mirroring the casing the event used for the original). Fully
-    /// reverted on failure so a half-rewritten option can never reach the screen.
+    /// Build the replacement option that offers <paramref name="standIn"/> in place of
+    /// <paramref name="from"/>, or null when this stand-in can't be used (caller then tries another).
+    ///
+    /// ★A retargeted option is REBUILT, not edited in place. <c>EventOption</c>'s constructor bakes
+    /// <c>Title</c>/<c>Description</c>/<c>HistoryName</c> from the text key once
+    /// (<c>Title = eventModel.GetOptionTitle(textKey)</c>), and <c>NEventOptionButton</c> renders
+    /// <c>Option.Title.GetFormattedText()</c> — it never reads <c>TextKey</c>. Rewriting only the key
+    /// therefore left the button showing the BLOCKED character's name above the stand-in's cards
+    /// (measured: pool=defect, key=…options.DEFECT, but label still 'Cyan'). Running the public
+    /// constructor makes the game derive all three strings itself, so label and reward can't drift,
+    /// and it needs no reflection beyond the closure swap.
+    ///
+    /// The pool swap targets the option's own closure — the event allocates one display class per
+    /// loop iteration, so this cannot disturb the other options — and the old option is discarded.
     /// </summary>
-    private static bool TryRetarget(EventOption opt, CardPoolModel from, CardPoolModel standIn)
+    private static EventOption? TryBuildRetargeted(EventModel ev, EventOption opt, CardPoolModel from, CardPoolModel standIn)
     {
-        string oldKey = opt.TextKey ?? string.Empty;
-        string newKey = RebuildTextKey(oldKey, from, standIn);
-        if (newKey.Length == 0 || !TrySetPool(opt, standIn)) return false;
-        if (TrySetTextKey(opt, newKey)) return true;
-        TrySetPool(opt, from); // relabel failed — restore the original pool and let the caller drop
-        return false;
+        try
+        {
+            string newKey = RebuildTextKey(opt.TextKey ?? string.Empty, standIn);
+            if (newKey.Length == 0) return null;
+
+            // A pool that never opted into this event has no "…options.<COLOR>" string; taking it
+            // would leave the button labelled with a raw color word. Skip it and try the next.
+            if (ev.GetOptionTitle(newKey) == null) return null;
+
+            if (OnChosenProp?.GetValue(opt) is not Func<Task> action) return null;
+            if (!TrySetPool(opt, standIn)) return null;
+
+            var rebuilt = new EventOption(ev, action, newKey) { HoverTips = opt.HoverTips };
+            if (!ReferenceEquals(ResolveTargetPool(rebuilt), standIn))
+            {
+                TrySetPool(opt, from); // never hand back a half-retargeted option
+                return null;
+            }
+            return rebuilt;
+        }
+        catch
+        {
+            TrySetPool(opt, from);
+            return null;
+        }
     }
 
     /// <summary>New TextKey for a retargeted option: same prefix, suffix replaced by the stand-in
-    /// pool's EnergyColorName in the same casing the event baked for the original option.</summary>
-    private static string RebuildTextKey(string originalKey, CardPoolModel from, CardPoolModel standIn)
+    /// pool's EnergyColorName. The event always bakes the suffix with
+    /// <c>EnergyColorName.ToUpperInvariant()</c>, so match that unconditionally rather than trying
+    /// to mirror the original's casing (a pool whose color name is already upper-case defeats a
+    /// mirror and leaks its raw casing into the key).</summary>
+    private static string RebuildTextKey(string originalKey, CardPoolModel standIn)
     {
         string color = standIn.EnergyColorName ?? string.Empty;
         if (color.Length == 0) return string.Empty;
         int dot = originalKey.LastIndexOf('.');
-        if (dot < 0) return string.Empty; // not the "....options.<color>" shape we know — don't guess
-        string suffix = originalKey.Substring(dot + 1);
-        string oldColor = from.EnergyColorName ?? string.Empty;
-        if (string.Equals(suffix, oldColor.ToUpperInvariant(), StringComparison.Ordinal)
-            && !string.Equals(suffix, oldColor, StringComparison.Ordinal))
-            color = color.ToUpperInvariant();
-        else if (string.Equals(suffix, oldColor.ToLowerInvariant(), StringComparison.Ordinal)
-                 && !string.Equals(suffix, oldColor, StringComparison.Ordinal))
-            color = color.ToLowerInvariant();
-        return originalKey.Substring(0, dot + 1) + color;
-    }
-
-    private static bool TrySetTextKey(EventOption opt, string value)
-    {
-        try
-        {
-            if (TextKeyProp?.CanWrite == true) TextKeyProp.SetValue(opt, value);
-            else if (TextKeyField != null) TextKeyField.SetValue(opt, value);
-            else return false;
-            return string.Equals(opt.TextKey, value, StringComparison.Ordinal);
-        }
-        catch { return false; }
+        if (dot < 0) return string.Empty; // not the "….options.<color>" shape we know — don't guess
+        return originalKey.Substring(0, dot + 1) + color.ToUpperInvariant();
     }
 
     /// <summary>Write the OnChosen closure's captured pool — the same field

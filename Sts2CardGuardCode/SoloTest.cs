@@ -668,7 +668,7 @@ internal static class SoloTest
 
             Check("no character is offered twice",
                   filtered.Select(o => o.Pool.Title ?? "").Distinct(StringComparer.OrdinalIgnoreCase).Count() == filtered.Count);
-            Check("every option label matches the pool it gives",
+            Check("every option TextKey matches the pool it gives",
                   filtered.All(o =>
                   {
                       string key = o.Key ?? "";
@@ -676,6 +676,20 @@ internal static class SoloTest
                       string suffix = dot >= 0 ? key.Substring(dot + 1) : key;
                       return string.Equals(suffix, o.Pool.EnergyColorName ?? "", StringComparison.OrdinalIgnoreCase);
                   }));
+
+            // ★The TextKey check above only proves we wrote the field WE write. The player never
+            // sees TextKey — NEventOptionButton renders Option.Title.GetFormattedText(), and the
+            // ctor baked Title from the ORIGINAL key. Assert the rendered label too, or a retarget
+            // that silently keeps the blocked character's name passes every other assertion.
+            foreach (var o in filtered)
+                W($"  option pool={o.Pool.Title} key={o.Key} label='{o.Label}' keyResolves='{o.KeyLabel}'");
+            Check("displayed label matches the option's own TextKey",
+                  filtered.All(o => string.Equals(o.Label, o.KeyLabel, StringComparison.Ordinal)));
+            var baselineLabelByTitle = baseline.ToDictionary(o => o.Pool.Title ?? "", o => o.Label, StringComparer.OrdinalIgnoreCase);
+            Check("no surviving option still shows the BLOCKED character's label",
+                  !filtered.Any(o => baselineLabelByTitle.TryGetValue(targetTitle, out var blockedLabel)
+                                     && blockedLabel.Length > 0
+                                     && string.Equals(o.Label, blockedLabel, StringComparison.Ordinal)));
 
             Step("philosophers: substitute must come from ONE pool, not a mix");
             var blockedCards = target
@@ -705,7 +719,12 @@ internal static class SoloTest
         return ok;
     }
 
-    private sealed record OfferedOption(CardPoolModel Pool, string Key);
+    /// <summary><c>Label</c> = what the player actually reads on the button
+    /// (<c>NEventOptionButton</c> renders <c>Option.Title.GetFormattedText()</c>, NOT the TextKey).
+    /// <c>KeyLabel</c> = what the option's own <c>Key</c> resolves to. They diverge if something
+    /// rewrites TextKey after construction, because the ctor bakes
+    /// <c>Title = eventModel.GetOptionTitle(textKey)</c> once.</summary>
+    private sealed record OfferedOption(CardPoolModel Pool, string Key, string Label, string KeyLabel);
 
     /// <summary>
     /// Run a fresh Colorful Philosophers instance for <paramref name="player"/> and report the
@@ -722,7 +741,14 @@ internal static class SoloTest
             foreach (var opt in ev.CurrentOptions)
             {
                 var p = Patches.ColorfulPhilosophers_Patch.ResolveTargetPool(opt);
-                if (p != null) options.Add(new OfferedOption(p, opt?.TextKey ?? ""));
+                if (p != null)
+                {
+                    string key = opt?.TextKey ?? "";
+                    string label = "", keyLabel = "";
+                    try { label = opt?.Title?.GetFormattedText() ?? ""; } catch (Exception e) { label = "<throw:" + e.GetType().Name + ">"; }
+                    try { keyLabel = ev.GetOptionTitle(key)?.GetFormattedText() ?? ""; } catch (Exception e) { keyLabel = "<throw:" + e.GetType().Name + ">"; }
+                    options.Add(new OfferedOption(p, key, label, keyLabel));
+                }
                 else W($"  (option '{opt?.TextKey}' has no resolvable pool)");
             }
             return options;
