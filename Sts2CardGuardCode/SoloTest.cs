@@ -142,12 +142,13 @@ internal static class SoloTest
             bool okCfg = RunConfigRoundTripTest(player);
             bool okLink = RunPackLinkageTest(player);
             bool okPhil = await RunPhilosophersOptionTest(player);
+            bool okPhilEdge = await RunPhilosophersEdgeTest(player);
             await ShotPanel(player);
 
-            bool ok = okBag && okRelicOne && okCardOne && okCfg && okLink && okPhil && _hoverOk;
+            bool ok = okBag && okRelicOne && okCardOne && okCfg && okLink && okPhil && okPhilEdge && _hoverOk;
             W($"=== summary: grabbag/ancient={okBag}, individual-relic={okRelicOne}, "
               + $"individual-card={okCardOne}, config-roundtrip={okCfg}, pack-linkage={okLink}, "
-              + $"philosophers={okPhil}, hover-preview={_hoverOk} ===");
+              + $"philosophers={okPhil}, philosophers-edge={okPhilEdge}, hover-preview={_hoverOk} ===");
 
             await Shot("2_final");
             W("=== solo test done ===");
@@ -726,12 +727,123 @@ internal static class SoloTest
     /// <c>Title = eventModel.GetOptionTitle(textKey)</c> once.</summary>
     private sealed record OfferedOption(CardPoolModel Pool, string Key, string Label, string KeyLabel);
 
+    /// <summary>One run of the event: the options it ended up showing, and whether it closed itself
+    /// (a zero-option event must finish, not sit there with nothing to click).</summary>
+    private sealed record EventProbe(List<OfferedOption> Options, bool IsFinished);
+
+    /// <summary>
+    /// The two paths the follow-up report actually hit, which the single-block test never reaches:
+    /// EVERY offered character blocked (the "只能跳过 / only Skip is left" case), and a character
+    /// blocked not by its checkbox but by having all of its cards blocked one by one — the
+    /// <c>HasAnyAllowedCard</c> route added in v0.5.2, which sends an option down the same retarget
+    /// path. Restores every block it sets, so the run's config is left exactly as found.
+    /// </summary>
+    private static async Task<bool> RunPhilosophersEdgeTest(Player player)
+    {
+        Step("philosophers-edge: baseline");
+        string charTitle = player.Character?.CardPool?.Title ?? "";
+        if (charTitle.Length == 0) { W("no current card pool — SKIP."); return true; }
+
+        var baseProbe = await ProbeEvent(player);
+        if (baseProbe == null || baseProbe.Options.Count == 0) { W("no options offered — SKIP."); return true; }
+        var baseline = baseProbe.Options;
+        W($"baseline: {baseline.Count} option(s) [{string.Join(", ", baseline.Select(o => o.Pool.Title))}], isFinished={baseProbe.IsFinished}");
+
+        bool ok = true;
+        void Check(string what, bool cond) { W($"assert: {what} = {cond}"); if (!cond) ok = false; }
+
+        var others = player.UnlockState.CharacterCardPools
+            .Where(p => p != null && !p.IsColorless
+                        && !string.Equals(p.Title ?? "", charTitle, StringComparison.OrdinalIgnoreCase)
+                        && (p.Title ?? "").Length > 0)
+            .ToList();
+        var savedCross = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in others) savedCross[p.Title!] = CardGuardService.GetCrossAllowed(charTitle, p.Title!);
+        var savedCards = new List<string>();
+        string cardVictimTitle = "";
+
+        try
+        {
+            // ── A) Every other character blocked: no stand-in can exist anywhere.
+            Step("philosophers-edge: block EVERY other character");
+            foreach (var p in others) CardGuardService.SetCrossAllowed(charTitle, p.Title!, false);
+            var none = await ProbeEvent(player);
+            if (none == null) { W("assert: the event threw with everything blocked — FAIL"); return false; }
+            W($"all-blocked: {none.Options.Count} option(s), isFinished={none.IsFinished}");
+            Check("no blocked character survives an all-blocked roll", none.Options.Count == 0);
+            Check("a zero-option event closes itself (no softlock)", none.IsFinished);
+
+            // ── B) Every ROLLED character blocked, but characters the roll missed stay allowed:
+            //       the offered slots should be handed to those spares rather than vanishing.
+            Step("philosophers-edge: block every rolled character, leave the rest allowed");
+            foreach (var p in others) CardGuardService.SetCrossAllowed(charTitle, p.Title!, true);
+            var rolled = new HashSet<string>(baseline.Select(o => o.Pool.Title ?? ""), StringComparer.OrdinalIgnoreCase);
+            foreach (var t in rolled) CardGuardService.SetCrossAllowed(charTitle, t, false);
+            int spares = others.Count(p => !rolled.Contains(p.Title!)
+                                           && !string.IsNullOrEmpty(p.EnergyColorName)
+                                           && CardGuardService.HasAnyAllowedCard(player, p));
+            var swapped = await ProbeEvent(player);
+            if (swapped == null) { W("assert: the event threw — FAIL"); return false; }
+            W($"rolled-blocked: {swapped.Options.Count} option(s) [{string.Join(", ", swapped.Options.Select(o => o.Pool.Title))}], spares available={spares}");
+            Check("no blocked character is offered", !swapped.Options.Any(o => rolled.Contains(o.Pool.Title ?? "")));
+            Check("as many slots kept as there were spares to fill them",
+                  swapped.Options.Count == Math.Min(baseline.Count, spares));
+            Check("no character is offered twice",
+                  swapped.Options.Select(o => o.Pool.Title ?? "").Distinct(StringComparer.OrdinalIgnoreCase).Count() == swapped.Options.Count);
+            Check("every displayed label still matches its own option key",
+                  swapped.Options.All(o => string.Equals(o.Label, o.KeyLabel, StringComparison.Ordinal)));
+
+            // ── C) Not cross-blocked, but emptied card-by-card (v0.5.2's HasAnyAllowedCard route).
+            foreach (var t in rolled) CardGuardService.SetCrossAllowed(charTitle, t, true);
+            var victim = baseline.Select(o => o.Pool)
+                .FirstOrDefault(p => p.GetType().Assembly != typeof(EventModel).Assembly);
+            if (victim == null)
+            {
+                W("no mod-added character in the roll — SKIP the per-card route (base cards are never listed one by one).");
+            }
+            else
+            {
+                cardVictimTitle = victim.Title ?? "";
+                Step($"philosophers-edge: block every card of '{cardVictimTitle}' individually");
+                foreach (var c in victim.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint))
+                {
+                    if (c == null) continue;
+                    string id = CardGuardService.CardIdOf(c);
+                    if (id.Length == 0 || !CardGuardService.GetCardAllowed(charTitle, id)) continue;
+                    CardGuardService.SetCardAllowed(charTitle, id, false);
+                    savedCards.Add(id);
+                }
+                W($"blocked {savedCards.Count} card(s); pack checkbox left ALLOWED (cross={CardGuardService.GetCrossAllowed(charTitle, cardVictimTitle)})");
+                var emptied = await ProbeEvent(player);
+                if (emptied == null) { W("assert: the event threw — FAIL"); return false; }
+                W($"card-emptied: {emptied.Options.Count} option(s) [{string.Join(", ", emptied.Options.Select(o => o.Pool.Title))}]");
+                Check("a character with no allowed cards left is not offered",
+                      !emptied.Options.Any(o => string.Equals(o.Pool.Title, cardVictimTitle, StringComparison.OrdinalIgnoreCase)));
+                Check("its slot is filled rather than lost", emptied.Options.Count == baseline.Count);
+                Check("every displayed label still matches its own option key",
+                      emptied.Options.All(o => string.Equals(o.Label, o.KeyLabel, StringComparison.Ordinal)));
+            }
+        }
+        finally
+        {
+            foreach (var (t, allowed) in savedCross) CardGuardService.SetCrossAllowed(charTitle, t, allowed);
+            foreach (var id in savedCards) CardGuardService.SetCardAllowed(charTitle, id, true);
+            W("philosophers-edge: config restored");
+        }
+
+        Step("philosophers-edge verdict");
+        return ok;
+    }
+
     /// <summary>
     /// Run a fresh Colorful Philosophers instance for <paramref name="player"/> and report the
     /// character pool and TextKey behind each surviving option. A mutable clone is used because
     /// <c>BeginEvent</c> refuses an instance that already has an owner. Null on failure.
     /// </summary>
     private static async Task<List<OfferedOption>?> OfferedPools(Player player)
+        => (await ProbeEvent(player))?.Options;
+
+    private static async Task<EventProbe?> ProbeEvent(Player player)
     {
         try
         {
@@ -751,7 +863,7 @@ internal static class SoloTest
                 }
                 else W($"  (option '{opt?.TextKey}' has no resolvable pool)");
             }
-            return options;
+            return new EventProbe(options, ev.IsFinished);
         }
         catch (Exception e) { W($"philosophers: event run failed: {e.Message}"); return null; }
     }
