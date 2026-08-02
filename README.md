@@ -49,7 +49,8 @@ are caught too — RitsuLib extends this event with them — as is a character w
 blocked one by one. A blocked choice is **replaced** by another allowed character rather than
 removed, so the event keeps its full set of options instead of shrinking (or, with every rolled
 character blocked, offering nothing but Skip); a choice is only dropped when no allowed character
-is left to stand in.
+is left to stand in. If you have blocked *every* other character the event is not placed on the map
+at all, so a room is not spent on an event that would end the moment you walked into it.
 
 ## In-game panel
 

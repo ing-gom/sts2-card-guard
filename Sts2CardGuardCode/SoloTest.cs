@@ -749,6 +749,13 @@ internal static class SoloTest
         var baseline = baseProbe.Options;
         W($"baseline: {baseline.Count} option(s) [{string.Join(", ", baseline.Select(o => o.Pool.Title))}], isFinished={baseProbe.IsFinished}");
 
+        // The placement gate must be a one-way door: with nothing blocked it has to leave the
+        // vanilla answer alone, or we would be deleting an event the game wanted to place.
+        var stateNow = RunManager.Instance?.State;
+        W($"assert: event still placeable with nothing blocked = {stateNow != null && ModelDb.Event<ColorfulPhilosophers>().IsAllowed(stateNow)}");
+        if (stateNow != null && !ModelDb.Event<ColorfulPhilosophers>().IsAllowed(stateNow))
+        { W("  ^ FAIL — the gate is suppressing the event when it should not."); return false; }
+
         bool ok = true;
         void Check(string what, bool cond) { W($"assert: {what} = {cond}"); if (!cond) ok = false; }
 
@@ -772,6 +779,13 @@ internal static class SoloTest
             W($"all-blocked: {none.Options.Count} option(s), isFinished={none.IsFinished}");
             Check("no blocked character survives an all-blocked roll", none.Options.Count == 0);
             Check("a zero-option event closes itself (no softlock)", none.IsFinished);
+
+            // …and it should not be PLACED at all in that state: vanilla gates on the unlock state,
+            // which blocks never touch, so without this the act still spends a room on an event that
+            // ends the moment you walk in.
+            var runState = RunManager.Instance?.State;
+            bool allowedWhenAllBlocked = runState != null && ModelDb.Event<ColorfulPhilosophers>().IsAllowed(runState);
+            Check("the event is not placed when every character is blocked", !allowedWhenAllBlocked);
 
             // Same config, different surface. An EVENT can end, so it offers nothing. A relic that
             // forces another character's cards on you (Kaleidoscope / Prismatic Gem) cannot — the

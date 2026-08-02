@@ -5,6 +5,7 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Events;
+using MegaCrit.Sts2.Core.Runs;
 
 namespace Sts2CardGuard.Patches;
 
@@ -156,20 +157,46 @@ internal static class ColorfulPhilosophers_Patch
                 bool wantBase = pass == 0;
                 foreach (var p in player.UnlockState.CharacterCardPools)
                 {
-                    if (p == null || p.IsColorless) continue;
+                    if (p == null) continue;
                     if ((p.GetType().Assembly == baseAsm) != wantBase) continue;
-                    if (string.IsNullOrEmpty(p.EnergyColorName)) continue;
-                    string t = p.Title ?? string.Empty;
-                    if (t.Length == 0 || t.Equals(currentTitle, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (offered.Contains(t)) continue;
-                    if (CardGuardService.IsCrossCharacterBlocked(player, t)) continue;
-                    if (!CardGuardService.HasAnyAllowedCard(player, p)) continue;
+                    if (offered.Contains(p.Title ?? string.Empty)) continue;
+                    if (!IsOfferable(player, currentTitle, p)) continue;
                     result.Add(p);
                 }
             }
         }
         catch { }
         return result;
+    }
+
+    /// <summary>A character this event could hand the player: someone else's colored pool, with a
+    /// color name to label the option, not blocked, and with at least one card left after the
+    /// per-card blocks.</summary>
+    private static bool IsOfferable(
+        MegaCrit.Sts2.Core.Entities.Players.Player player, string currentTitle, CardPoolModel pool)
+    {
+        if (pool.IsColorless) return false;
+        if (string.IsNullOrEmpty(pool.EnergyColorName)) return false;
+        string t = pool.Title ?? string.Empty;
+        if (t.Length == 0 || t.Equals(currentTitle, StringComparison.OrdinalIgnoreCase)) return false;
+        if (CardGuardService.IsCrossCharacterBlocked(player, t)) return false;
+        return CardGuardService.HasAnyAllowedCard(player, pool);
+    }
+
+    /// <summary>Whether this event has anyone left to offer <paramref name="player"/>.</summary>
+    internal static bool HasOfferablePool(MegaCrit.Sts2.Core.Entities.Players.Player? player)
+    {
+        if (player == null) return true;
+        try
+        {
+            var currentPool = CardGuardService.TryGetCurrentPool(player);
+            if (currentPool == null) return true;
+            string currentTitle = currentPool.Title ?? string.Empty;
+            foreach (var p in player.UnlockState.CharacterCardPools)
+                if (p != null && IsOfferable(player, currentTitle, p)) return true;
+            return false;
+        }
+        catch { return true; } // can't tell — leave the event exactly as vanilla placed it
     }
 
     /// <summary>
@@ -303,5 +330,43 @@ internal static class ColorfulPhilosophers_Patch
             }
         }
         return map;
+    }
+}
+
+/// <summary>
+/// Don't PLACE the event at all when the filter would leave it with nothing to offer.
+///
+/// Vanilla gates this event on the unlock state (<c>CharacterCardPools.Count() &gt; 1</c>), which our
+/// blocks never touch — so blocking every other character still put the event on the map, and
+/// walking into it burned the room for nothing: zero options, and the game closes a zero-option
+/// event immediately (measured: <c>0 option(s), isFinished=True</c>). Gate it on there being at
+/// least one character we could actually hand over, so the act places some other event instead.
+///
+/// This only ever turns a true into a false — the event can never start appearing where vanilla
+/// would not have put it. Both peers evaluate it from the same host-supplied config during their
+/// own deterministic map generation, so it cannot diverge; under multiplayer pass-through nothing
+/// is blocked and the vanilla answer stands unchanged. Anything unreadable fails open (event kept).
+///
+/// Deliberately NOT gated on the option's localization existing: that check belongs at option-build
+/// time, where the real key is in hand. Guessing the key prefix here would silently delete a vanilla
+/// event if MegaCrit ever renamed it — a far worse failure than showing one option fewer.
+/// </summary>
+[HarmonyPatch(typeof(ColorfulPhilosophers), nameof(ColorfulPhilosophers.IsAllowed))]
+internal static class ColorfulPhilosophers_IsAllowed_Patch
+{
+    private static void Postfix(IRunState runState, ref bool __result)
+    {
+        if (!__result) return;
+        try
+        {
+            foreach (var player in runState.Players)
+            {
+                if (ColorfulPhilosophers_Patch.HasOfferablePool(player)) continue;
+                Log.Info("ColorfulPhilosophers: every character is blocked — not placing the event");
+                __result = false;
+                return;
+            }
+        }
+        catch (Exception ex) { Log.Warn($"ColorfulPhilosophers IsAllowed gate error: {ex.Message}"); }
     }
 }
