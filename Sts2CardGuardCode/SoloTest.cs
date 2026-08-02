@@ -602,9 +602,12 @@ internal static class SoloTest
     /// <summary>
     /// Colorful Philosophers picks a FOREIGN character pool before any card exists, so its options
     /// bypass the card filter and need their own hook. Regression for the reported "a blocked MOD
-    /// character is still offered, and picking it hands back a mix of the classes you did NOT block":
+    /// character is still offered, and picking it hands back a mix of the classes you did NOT block"
+    /// and its follow-up "the blocked option now just disappears, shrinking the event":
     ///   1. run the event with nothing blocked → record which pools it offers (baseline),
-    ///   2. block one of them → the same event must drop that option and keep the others,
+    ///   2. block one of them → the same event must not offer that pool any more, and — as long as
+    ///      another allowed character exists to stand in — must offer the SAME NUMBER of options,
+    ///      each labelled with the color of the pool it actually gives (retarget, not drop),
     ///   3. filtering that pool's cards must substitute from exactly ONE other pool, never a mix.
     /// The event Rng is seeded from the run seed + event id, so both runs consider the same candidate
     /// set — the only difference is our filter. A MOD pool is preferred as the target, since that is
@@ -618,12 +621,12 @@ internal static class SoloTest
 
         var baseline = await OfferedPools(player);
         if (baseline == null) { W("assert: could not run the event — FAIL"); return false; }
-        W($"baseline options: {baseline.Count} [{string.Join(", ", baseline.Select(p => p.Title))}]");
+        W($"baseline options: {baseline.Count} [{string.Join(", ", baseline.Select(o => o.Pool.Title))}]");
         if (baseline.Count < 2)
         { W("assert: fewer than 2 foreign pools offered — cannot exercise the option filter, SKIP."); return true; }
 
         var baseAsm = typeof(EventModel).Assembly;
-        var target = baseline.FirstOrDefault(p => p.GetType().Assembly != baseAsm) ?? baseline[0];
+        var target = (baseline.FirstOrDefault(o => o.Pool.GetType().Assembly != baseAsm) ?? baseline[0]).Pool;
         string targetTitle = target.Title ?? "";
         bool isMod = target.GetType().Assembly != baseAsm;
         W($"target pool: {targetTitle} (mod-added={isMod})");
@@ -642,12 +645,37 @@ internal static class SoloTest
             CardGuardService.SetCrossAllowed(charTitle, targetTitle, false);
             var filtered = await OfferedPools(player);
             if (filtered == null) { W("assert: could not re-run the event — FAIL"); return false; }
-            W($"filtered options: {filtered.Count} [{string.Join(", ", filtered.Select(p => p.Title))}]");
+            W($"filtered options: {filtered.Count} [{string.Join(", ", filtered.Select(o => o.Pool.Title))}]");
 
             Check($"blocked pool '{targetTitle}' is no longer offered",
-                  !filtered.Any(p => string.Equals(p.Title, targetTitle, StringComparison.OrdinalIgnoreCase)));
-            Check("the other options survive",
-                  filtered.Count == baseline.Count - baseline.Count(p => string.Equals(p.Title, targetTitle, StringComparison.OrdinalIgnoreCase)));
+                  !filtered.Any(o => string.Equals(o.Pool.Title, targetTitle, StringComparison.OrdinalIgnoreCase)));
+
+            // A stand-in exists when some unlocked, non-own, non-colorless pool with a color name is
+            // neither blocked (only the target is, in this test) nor already on the baseline list.
+            var baselineTitles = new HashSet<string>(baseline.Select(o => o.Pool.Title ?? ""), StringComparer.OrdinalIgnoreCase);
+            bool spareExists = player.UnlockState.CharacterCardPools.Any(p =>
+                p != null && !p.IsColorless && !string.IsNullOrEmpty(p.EnergyColorName)
+                && !string.Equals(p.Title ?? "", charTitle, StringComparison.OrdinalIgnoreCase)
+                && !baselineTitles.Contains(p.Title ?? "")
+                && CardGuardService.GetCrossAllowed(charTitle, p.Title ?? "")
+                && CardGuardService.HasAnyAllowedCard(player, p));
+            if (spareExists)
+                Check("blocked option is retargeted, not dropped (count preserved)",
+                      filtered.Count == baseline.Count);
+            else
+                Check("no stand-in available — blocked option dropped, the others survive",
+                      filtered.Count == baseline.Count - baseline.Count(o => string.Equals(o.Pool.Title, targetTitle, StringComparison.OrdinalIgnoreCase)));
+
+            Check("no character is offered twice",
+                  filtered.Select(o => o.Pool.Title ?? "").Distinct(StringComparer.OrdinalIgnoreCase).Count() == filtered.Count);
+            Check("every option label matches the pool it gives",
+                  filtered.All(o =>
+                  {
+                      string key = o.Key ?? "";
+                      int dot = key.LastIndexOf('.');
+                      string suffix = dot >= 0 ? key.Substring(dot + 1) : key;
+                      return string.Equals(suffix, o.Pool.EnergyColorName ?? "", StringComparison.OrdinalIgnoreCase);
+                  }));
 
             Step("philosophers: substitute must come from ONE pool, not a mix");
             var blockedCards = target
@@ -677,25 +705,27 @@ internal static class SoloTest
         return ok;
     }
 
+    private sealed record OfferedOption(CardPoolModel Pool, string Key);
+
     /// <summary>
     /// Run a fresh Colorful Philosophers instance for <paramref name="player"/> and report the
-    /// character pool behind each surviving option. A mutable clone is used because
+    /// character pool and TextKey behind each surviving option. A mutable clone is used because
     /// <c>BeginEvent</c> refuses an instance that already has an owner. Null on failure.
     /// </summary>
-    private static async Task<List<CardPoolModel>?> OfferedPools(Player player)
+    private static async Task<List<OfferedOption>?> OfferedPools(Player player)
     {
         try
         {
             var ev = (ColorfulPhilosophers)ModelDb.Event<ColorfulPhilosophers>().MutableClone();
             await ev.BeginEvent(player, isPreFinished: false);
-            var pools = new List<CardPoolModel>();
+            var options = new List<OfferedOption>();
             foreach (var opt in ev.CurrentOptions)
             {
                 var p = Patches.ColorfulPhilosophers_Patch.ResolveTargetPool(opt);
-                if (p != null) pools.Add(p);
+                if (p != null) options.Add(new OfferedOption(p, opt?.TextKey ?? ""));
                 else W($"  (option '{opt?.TextKey}' has no resolvable pool)");
             }
-            return pools;
+            return options;
         }
         catch (Exception e) { W($"philosophers: event run failed: {e.Message}"); return null; }
     }

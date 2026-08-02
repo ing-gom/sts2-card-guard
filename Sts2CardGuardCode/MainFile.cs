@@ -16,7 +16,7 @@ namespace Sts2CardGuard;
 public partial class MainFile : Node
 {
     public const string ModId = "Sts2CardGuard";
-    public const string Version = "v0.5.2";
+    public const string Version = "v0.5.3";
 
     public static MegaCrit.Sts2.Core.Logging.Logger Logger { get; }
         = new(ModId, MegaCrit.Sts2.Core.Logging.LogType.Generic);

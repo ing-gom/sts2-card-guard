@@ -45,8 +45,11 @@ substituted (falling back to your own only if no other is allowed), so the Kalei
 surfaces your own class and the replacement still reads as a single class instead of a mash-up of
 every class you left allowed. The Colorful Philosophers event also has its **choice list** filtered
 directly: each option is matched against the card pool it actually offers, so mod-added characters
-are hidden too — RitsuLib extends this event with them — as is a character whose cards you have
-blocked one by one.
+are caught too — RitsuLib extends this event with them — as is a character whose cards you have
+blocked one by one. A blocked choice is **replaced** by another allowed character rather than
+removed, so the event keeps its full set of options instead of shrinking (or, with every rolled
+character blocked, offering nothing but Skip); a choice is only dropped when no allowed character
+is left to stand in.
 
 ## In-game panel
 

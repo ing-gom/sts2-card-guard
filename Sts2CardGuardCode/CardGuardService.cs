@@ -533,8 +533,10 @@ internal static class CardGuardService
     }
 
     /// <summary>FNV-1a over <paramref name="key"/>, reduced to [0, count). Hand-rolled instead of
-    /// <c>string.GetHashCode</c>, which is randomized per process and would differ between peers.</summary>
-    private static int StableIndex(string key, int count)
+    /// <c>string.GetHashCode</c>, which is randomized per process and would differ between peers.
+    /// Internal: the Colorful Philosophers option retarget uses the same hash so a blocked
+    /// character maps to the same stand-in everywhere.</summary>
+    internal static int StableIndex(string key, int count)
     {
         if (count <= 1) return 0;
         uint h = 2166136261u;
