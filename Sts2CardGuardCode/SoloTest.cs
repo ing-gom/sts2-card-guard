@@ -773,6 +773,29 @@ internal static class SoloTest
             Check("no blocked character survives an all-blocked roll", none.Options.Count == 0);
             Check("a zero-option event closes itself (no softlock)", none.IsFinished);
 
+            // Same config, different surface. An EVENT can end, so it offers nothing. A relic that
+            // forces another character's cards on you (Kaleidoscope / Prismatic Gem) cannot — the
+            // pool must not be left empty or the RNG pick throws — so with no other character
+            // allowed the substitute has to fall back to the player's OWN class. Assert that split
+            // explicitly: "everything blocked" means no event, but own-class cards from a relic.
+            var foreignCards = others
+                .SelectMany(p => { try { return p.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint); } catch { return Enumerable.Empty<CardModel>(); } })
+                .Where(c => c != null).ToList();
+            if (foreignCards.Count == 0)
+            {
+                W("no foreign cards to feed the substitute — SKIP.");
+            }
+            else
+            {
+                var sub = CardGuardService.Filter(foreignCards, player).ToList();
+                var subTitles = sub.Select(c => { try { return c.Pool?.Title ?? ""; } catch { return ""; } })
+                                   .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                W($"relic-path substitute with EVERYTHING blocked: {sub.Count} card(s) from [{string.Join(", ", subTitles)}]");
+                Check("relic substitute falls back to the player's OWN class when nothing else is allowed",
+                      sub.Count > 0 && subTitles.Count == 1
+                      && string.Equals(subTitles[0], charTitle, StringComparison.OrdinalIgnoreCase));
+            }
+
             // ── B) Every ROLLED character blocked, but characters the roll missed stay allowed:
             //       the offered slots should be handed to those spares rather than vanishing.
             Step("philosophers-edge: block every rolled character, leave the rest allowed");
