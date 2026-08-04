@@ -34,10 +34,15 @@ internal static class CardGuardService
     private static readonly Dictionary<string, HashSet<string>> ModBlock = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Per-character BLOCKED individual card ids (see <see cref="CardIdOf"/>). MOD cards only: the
-    /// panel never lists base-game cards one by one, so a base card can still only be removed by
-    /// unchecking its whole character pack. Independent of the pack checkbox — a blocked pack hides
-    /// everything regardless of what is ticked here, and unblocking the pack restores these entries.
+    /// Per-character BLOCKED individual card ids (see <see cref="CardIdOf"/>). Covers BASE-GAME and
+    /// mod cards alike: the panel lists every card in a character pack one by one. Independent of
+    /// the pack checkbox — a blocked pack hides everything regardless of what is ticked here, and
+    /// unblocking the pack restores these entries.
+    ///
+    /// A block here is ABSOLUTE: a blocked card must never be offered, so the filter never "tops up"
+    /// a thin pool by handing a blocked card back. Where the game would otherwise demand more cards
+    /// than remain, the DEMAND is reduced instead — see the clamp patches in
+    /// <c>Patches/CardFilterPatches.cs</c> and <c>Patches/CardSelectPatches.cs</c>.
     /// </summary>
     private static readonly Dictionary<string, HashSet<string>> CardBlock = new(StringComparer.OrdinalIgnoreCase);
 
@@ -211,6 +216,10 @@ internal static class CardGuardService
         lock (_lock) { _mpPassThrough = true; _mpUseOverride = false; }
     }
 
+    /// <summary>Filtering is disabled for this run (unverifiable networked lobby) — every guard that
+    /// changes what the game does must no-op, or peers would diverge.</summary>
+    public static bool IsPassThrough => _mpPassThrough;
+
     /// <summary>Back to normal singleplayer behavior (local config, filtering on).</summary>
     public static void ClearMpState()
     {
@@ -350,9 +359,9 @@ internal static class CardGuardService
 
     private static Dictionary<string, ModPack>? _modPacks;
 
-    /// <summary>Pool title → that pool's MOD cards. Feeds the detail list for a custom character,
-    /// whose cards are listed under the character section rather than as a mod card pack.</summary>
-    private static Dictionary<string, List<CardModel>>? _poolModCards;
+    /// <summary>Pool title → EVERY card in that pool, base-game and mod alike. Feeds the character
+    /// detail list, which lists a pack's cards one by one regardless of who added them.</summary>
+    private static Dictionary<string, List<CardModel>>? _poolAllCards;
 
     /// <summary>
     /// Every loaded mod that adds registered cards, mapped to its card counts (total, colorless,
@@ -363,7 +372,8 @@ internal static class CardGuardService
     {
         if (_modPacks != null) return _modPacks;
         var map = new Dictionary<string, ModPack>(OIC);
-        var poolCards = new Dictionary<string, List<CardModel>>(OIC);
+        var allPoolCards = new Dictionary<string, List<CardModel>>(OIC);
+        var seenPerPool = new Dictionary<string, HashSet<string>>(OIC);
         var seenPerMod = new Dictionary<string, HashSet<string>>(OIC);
         try
         {
@@ -376,7 +386,24 @@ internal static class CardGuardService
                 try { cards = pool.AllCards; } catch { continue; }
                 foreach (var c in cards)
                 {
-                    if (c == null || !IsModCard(c)) continue;
+                    if (c == null) continue;
+
+                    // Every card in the pool, base-game included — the per-pool detail list is no
+                    // longer mod-only. Deduped per pool: AllCards can repeat an id across variants.
+                    string aid = CardIdOf(c);
+                    if (aid.Length > 0)
+                    {
+                        if (!seenPerPool.TryGetValue(ptitle, out var pseen))
+                        { pseen = new HashSet<string>(OIC); seenPerPool[ptitle] = pseen; }
+                        if (pseen.Add(aid))
+                        {
+                            if (!allPoolCards.TryGetValue(ptitle, out var al))
+                            { al = new List<CardModel>(); allPoolCards[ptitle] = al; }
+                            al.Add(c);
+                        }
+                    }
+
+                    if (!IsModCard(c)) continue;
                     string mod = GetModName(c);
                     if (string.IsNullOrEmpty(mod)) continue;
 
@@ -391,28 +418,52 @@ internal static class CardGuardService
                     mp.PerPool.TryGetValue(ptitle, out int n);
                     mp.PerPool[ptitle] = n + 1;
                     mp.Cards.Add(c);
-
-                    if (!poolCards.TryGetValue(ptitle, out var pl)) { pl = new List<CardModel>(); poolCards[ptitle] = pl; }
-                    pl.Add(c);
                 }
             }
         }
         catch (Exception ex) { Log.Warn($"mod card pack scan failed: {ex.Message}"); }
-        _poolModCards = poolCards;
+        _poolAllCards = allPoolCards;
         _modPacks = map;
         return _modPacks;
     }
 
-    /// <summary>The MOD cards sitting in the card pool titled <paramref name="poolTitle"/> (a custom
-    /// character's own cards). Empty for base-game pools — individual blocks are mod-only.</summary>
-    public static IReadOnlyList<CardModel> GetPoolModCards(string poolTitle)
+    /// <summary>Every card in the pool titled <paramref name="poolTitle"/>, base-game and mod alike.
+    /// Backs the character detail list, where individual blocking is no longer mod-only.</summary>
+    public static IReadOnlyList<CardModel> GetPoolAllCards(string poolTitle)
     {
-        if (_poolModCards == null) GetModCardPacks();
-        if (_poolModCards != null && _poolModCards.TryGetValue(poolTitle ?? string.Empty, out var l)) return l;
+        if (_poolAllCards == null) GetModCardPacks();
+        if (_poolAllCards != null && _poolAllCards.TryGetValue(poolTitle ?? string.Empty, out var l)) return l;
         return Array.Empty<CardModel>();
     }
 
     // ---- Core filter ----
+
+    /// <summary>
+    /// Removes every disallowed card, with NO empty-pool safety net — the result really can be
+    /// empty. For callers that can handle "nothing left" themselves (the transformation guard) and
+    /// so must not be handed a blocked card back. <see cref="Filter"/> is the general entry point.
+    /// </summary>
+    public static IEnumerable<CardModel> FilterStrict(IEnumerable<CardModel> cards, Player? player)
+    {
+        if (cards == null) return cards!;
+        if (_mpPassThrough) return cards;
+
+        var currentPool = TryGetCurrentPool(player);
+        if (currentPool == null) return cards;
+
+        List<CardModel> materialized;
+        try { materialized = cards.ToList(); }
+        catch { return cards; }
+
+        var kept = new List<CardModel>(materialized.Count);
+        foreach (var c in materialized)
+        {
+            if (c == null) continue;
+            try { if (IsAllowed(c, currentPool)) kept.Add(c); }
+            catch { kept.Add(c); } // unreadable card — leave the game's own behaviour alone
+        }
+        return kept;
+    }
 
     /// <summary>
     /// Returns <paramref name="cards"/> with disallowed entries removed. Crash-safe: if every
@@ -608,10 +659,10 @@ internal static class CardGuardService
     {
         string currentTitle = currentPool.Title ?? string.Empty;
 
-        // Individual card block (mod cards only — the panel lists no base cards one by one).
+        // Individual card block — BASE-GAME cards included (the panel lists every card in a pack).
         // Independent of the pack gates below: either one blocking is enough to drop the card.
         // Checked up front so it also holds for a card whose Pool can't be resolved.
-        if (IsModCard(card) && !GetCardAllowed(currentTitle, CardIdOf(card))) return false;
+        if (!GetCardAllowed(currentTitle, CardIdOf(card))) return false;
 
         CardPoolModel pool;
         try { pool = card.Pool; }

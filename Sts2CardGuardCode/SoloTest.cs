@@ -15,11 +15,15 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Godot;
+using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Factories;
 using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Nodes;
@@ -143,12 +147,15 @@ internal static class SoloTest
             bool okLink = RunPackLinkageTest(player);
             bool okPhil = await RunPhilosophersOptionTest(player);
             bool okPhilEdge = await RunPhilosophersEdgeTest(player);
+            bool okBaseClamp = RunBaseCardClampTest(player);
             await ShotPanel(player);
 
-            bool ok = okBag && okRelicOne && okCardOne && okCfg && okLink && okPhil && okPhilEdge && _hoverOk;
+            bool ok = okBag && okRelicOne && okCardOne && okCfg && okLink && okPhil && okPhilEdge
+                      && okBaseClamp && _hoverOk;
             W($"=== summary: grabbag/ancient={okBag}, individual-relic={okRelicOne}, "
               + $"individual-card={okCardOne}, config-roundtrip={okCfg}, pack-linkage={okLink}, "
-              + $"philosophers={okPhil}, philosophers-edge={okPhilEdge}, hover-preview={_hoverOk} ===");
+              + $"philosophers={okPhil}, philosophers-edge={okPhilEdge}, base-clamp={okBaseClamp}, "
+              + $"hover-preview={_hoverOk} ===");
 
             await Shot("2_final");
             W("=== solo test done ===");
@@ -450,6 +457,109 @@ internal static class SoloTest
 
         CardGuardService.SetCardAllowed(charTitle, victimId, true);
         return victimGone && exactlyOne && reportAgrees;
+    }
+
+    /// <summary>
+    /// v0.6.0: BASE-GAME cards are individually blockable, and a block is absolute — where the game
+    /// would want more cards than survive the filter, the demand is clamped rather than a blocked
+    /// card being handed back. Drives the real <c>CardFactory.CreateForReward</c>, so the clamp
+    /// prefix, our filter postfix and the game's own rarity roll are all exercised together; before
+    /// v0.6.0 the same calls could not be starved at all, because base cards were unblockable.
+    ///
+    /// Only ever blocks cards it first observed as allowed, restores exactly those in the finally,
+    /// and never calls <c>CardGuardConfig.Save</c> — the player's settings file is not touched.
+    /// </summary>
+    private static bool RunBaseCardClampTest(Player player)
+    {
+        Step("base-card clamp: enumerate own pool");
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+        var pool = player.Character?.CardPool;
+        if (pool == null) { W("no character pool — SKIP."); return true; }
+
+        List<CardModel> all;
+        try
+        {
+            all = pool.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint)
+                      .Where(c => c != null).Distinct().ToList();
+        }
+        catch (Exception e) { W($"pool enumeration failed: {e.Message} — SKIP."); return true; }
+
+        // Rewards roll a rarity from what survives, so the survivors must share a rarity the reward
+        // odds can actually select. Common is the one every character pool has plenty of.
+        var commons = all.Where(c => { try { return c.Rarity == CardRarity.Common; } catch { return false; } }).ToList();
+        W($"own pool '{charTitle}': {all.Count} unlocked, {commons.Count} common");
+        if (commons.Count < 2) { W("fewer than 2 commons — SKIP."); return true; }
+
+        var survivors = commons.Take(2).ToList();
+        var survivorIds = survivors.Select(CardGuardService.CardIdOf).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var toBlock = all.Where(c => !survivorIds.Contains(CardGuardService.CardIdOf(c)))
+                         .Where(c => CardGuardService.GetCardAllowed(charTitle, CardGuardService.CardIdOf(c)))
+                         .ToList();
+
+        bool baseBlockOk = false, clamp2Ok = false, clamp1Ok = false, prefsOk = false;
+        try
+        {
+            Step("base-card clamp: block every own-pool card but 2 commons");
+            foreach (var c in toBlock) CardGuardService.SetCardAllowed(charTitle, CardGuardService.CardIdOf(c), false);
+            W($"blocked {toBlock.Count} card(s); survivors: {string.Join(", ", survivors.Select(c => c.Id.Entry))}");
+
+            // (2) base-game blocking actually bites — this is the v0.6.0 feature itself.
+            var kept = CardGuardService.Filter(all, player).ToList();
+            baseBlockOk = kept.Count == survivors.Count
+                          && kept.All(c => survivorIds.Contains(CardGuardService.CardIdOf(c)));
+            W($"assert: base cards filtered to survivors only = {baseBlockOk} ({all.Count} -> {kept.Count})");
+
+            // (3) a 3-card reward must come back as 2 allowed cards, not an exception.
+            Step("base-card clamp: 3-card reward with 2 allowed");
+            clamp2Ok = RewardYields(player, 3, 2, survivorIds);
+
+            // (4) ...and down to a single card, the floor the UI rule guarantees.
+            Step("base-card clamp: 3-card reward with 1 allowed");
+            CardGuardService.SetCardAllowed(charTitle, CardGuardService.CardIdOf(survivors[1]), false);
+            var oneId = new HashSet<string>(new[] { CardGuardService.CardIdOf(survivors[0]) }, StringComparer.OrdinalIgnoreCase);
+            clamp1Ok = RewardYields(player, 3, 1, oneId);
+
+            // (5) the selection-demand clamp, which is what keeps Sealed Deck from soft-locking.
+            Step("base-card clamp: selector demand fit");
+            var probe = new CardSelectorPrefs(new LocString("modifiers", "SEALED_DECK.selectionPrompt"), 10)
+            { RequireManualConfirmation = true, Cancelable = false };
+            var fitted = Patches.SelectorClamp.Fit(probe, 1);
+            prefsOk = fitted.MinSelect == 1 && fitted.MaxSelect == 1
+                      && fitted.RequireManualConfirmation && !fitted.Cancelable;
+            W($"assert: prefs 10..10 fitted to 1 card = {prefsOk} "
+              + $"({fitted.MinSelect}..{fitted.MaxSelect}, manualConfirm={fitted.RequireManualConfirmation}, cancelable={fitted.Cancelable})");
+        }
+        catch (Exception e) { W($"base-card clamp exception: {e}"); }
+        finally
+        {
+            foreach (var c in toBlock) CardGuardService.SetCardAllowed(charTitle, CardGuardService.CardIdOf(c), true);
+            foreach (var c in survivors) CardGuardService.SetCardAllowed(charTitle, CardGuardService.CardIdOf(c), true);
+            W("restored own-pool card blocks");
+        }
+
+        return baseBlockOk && clamp2Ok && clamp1Ok && prefsOk;
+    }
+
+    /// <summary>Asks the real reward factory for <paramref name="ask"/> cards and checks it came back
+    /// with exactly <paramref name="expect"/>, every one of them allowed. A throw here is the failure
+    /// the clamp exists to prevent ("couldn't generate a valid rarity").</summary>
+    private static bool RewardYields(Player player, int ask, int expect, HashSet<string> allowedIds)
+    {
+        try
+        {
+            var options = CardCreationOptions.ForRoom(player, RoomType.Monster);
+            var got = CardFactory.CreateForReward(player, ask, options).ToList();
+            bool countOk = got.Count == expect;
+            bool allAllowed = got.All(r => allowedIds.Contains(CardGuardService.CardIdOf(r.Card)));
+            W($"assert: asked {ask}, got {got.Count} (expected {expect}) = {countOk}; "
+              + $"all allowed = {allAllowed} [{string.Join(", ", got.Select(r => r.Card?.Id.Entry))}]");
+            return countOk && allAllowed;
+        }
+        catch (Exception e)
+        {
+            W($"assert: reward generation THREW (this is the clamp failing): {e.Message}");
+            return false;
+        }
     }
 
     /// <summary>
@@ -885,7 +995,9 @@ internal static class SoloTest
         try
         {
             var ev = (ColorfulPhilosophers)ModelDb.Event<ColorfulPhilosophers>().MutableClone();
-            await ev.BeginEvent(player, isPreFinished: false);
+            // combatSynchronizer is null: this probe only reads the event's generated options and
+            // never runs its combat. (The parameter was added to BeginEvent by a game update.)
+            await ev.BeginEvent(player, null, isPreFinished: false);
             var options = new List<OfferedOption>();
             foreach (var opt in ev.CurrentOptions)
             {

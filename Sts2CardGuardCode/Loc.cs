@@ -24,7 +24,7 @@ internal static class Loc
         ["title"] = "Card / Relic Pack Filter",
         ["enable"] = "Enable",
         ["colorless"] = "Allow colorless",
-        ["hint"] = "Default: all card packs are allowed. Pick a character on the left, then UNCHECK a pack on the right to block it for that character. Press Detail to block single cards of a mod pack.",
+        ["hint"] = "Default: all card packs are allowed. Pick a character on the left, then UNCHECK a pack on the right to block it for that character. Press Detail to block cards one by one — base-game cards included, your own class too. At least one card must stay allowed.",
         ["configure"] = "Configure character",
         ["sec_char"] = "Character card packs",
         ["sec_mod"] = "Mod card packs",
@@ -46,6 +46,7 @@ internal static class Loc
         ["counts_fmt"] = "   ({0} on / {1} off)",
         ["no_items"] = "(nothing matches)",
         ["pack_off_note"] = "This whole pack is currently blocked — re-check the pack to make these individual settings take effect.",
+        ["min_one"] = "At least one card has to stay allowed — this block was not applied.",
     };
 
     private static readonly Dictionary<string, string> Ko = new()
@@ -54,7 +55,7 @@ internal static class Loc
         ["title"] = "카드/유물 팩 필터",
         ["enable"] = "사용",
         ["colorless"] = "무색 허용",
-        ["hint"] = "기본: 모든 카드팩 허용. 왼쪽에서 캐릭터를 고르고, 오른쪽에서 차단할 카드팩의 체크를 해제하세요. 모드 카드팩은 [상세]로 카드 한 장씩 차단할 수 있습니다.",
+        ["hint"] = "기본: 모든 카드팩 허용. 왼쪽에서 캐릭터를 고르고, 오른쪽에서 차단할 카드팩의 체크를 해제하세요. [상세]로 카드를 한 장씩 차단할 수 있습니다 — 기본 게임 카드도, 자기 클래스도 포함입니다(최소 한 장은 남겨야 함).",
         ["configure"] = "설정할 캐릭터",
         ["sec_char"] = "캐릭터 카드팩",
         ["sec_mod"] = "모드 카드팩",
@@ -76,6 +77,7 @@ internal static class Loc
         ["counts_fmt"] = "   (허용 {0} / 차단 {1})",
         ["no_items"] = "(검색 결과 없음)",
         ["pack_off_note"] = "이 팩은 현재 통째로 차단된 상태입니다 — 팩 체크를 다시 켜야 아래 개별 설정이 적용됩니다.",
+        ["min_one"] = "카드를 최소 한 장은 남겨야 합니다 — 이 차단은 적용되지 않았습니다.",
     };
 
     private static readonly Dictionary<string, string> Zh = new()
@@ -84,7 +86,7 @@ internal static class Loc
         ["title"] = "卡牌/遗物包过滤器",
         ["enable"] = "启用",
         ["colorless"] = "允许无色卡",
-        ["hint"] = "默认：允许所有卡包。在左侧选择角色，然后在右侧取消勾选某个卡包即可为该角色屏蔽。模组卡包可点击[详细]逐张屏蔽。",
+        ["hint"] = "默认：允许所有卡包。在左侧选择角色，然后在右侧取消勾选某个卡包即可为该角色屏蔽。可点击[详细]逐张屏蔽 — 包括基础卡牌与本职业卡牌（至少需保留一张）。",
         ["configure"] = "选择角色",
         ["sec_char"] = "角色卡包",
         ["sec_mod"] = "模组卡包",
@@ -106,6 +108,7 @@ internal static class Loc
         ["counts_fmt"] = "   (允许 {0} / 屏蔽 {1})",
         ["no_items"] = "(无匹配结果)",
         ["pack_off_note"] = "该卡包目前被整体屏蔽 — 需重新勾选卡包，下面的单项设置才会生效。",
+        ["min_one"] = "至少需要保留一张卡牌 — 本次屏蔽未生效。",
     };
 
     private static readonly Dictionary<string, Dictionary<string, string>> Langs = new()

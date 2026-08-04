@@ -70,19 +70,25 @@ character. Custom characters appear only in the character section (one checkbox 
 Settings persist to `Settings/card_guard_config.txt` (JSON) next to the mod DLL and apply from the
 first screen on the next launch. English, Korean and Simplified Chinese are supported (follows the game language).
 
-## Per-item blocking (v0.5.0)
+## Per-item blocking (v0.5.0, base-game cards since v0.6.0)
 
-A whole pack is often too blunt — usually only a handful of a mod's cards or relics are unwanted.
-Press **Detail** next to any mod pack to open its contents and tick them one by one.
+A whole pack is often too blunt — usually only a handful of cards or relics are unwanted.
+Press **Detail** next to any pack to open its contents and tick them one by one.
 
 - **Cards** — hovering a row shows the **real card**, rendered by the game itself, so you can see the
   art, cost and text of exactly what you are about to block.
 - **Relics** — every row carries its icon.
 - A search box and **Allow all / Block all** keep long lists (200+ cards) workable.
 
-Only mod-added content is individually blockable; base-game cards and relics stay all-or-nothing
-through their pack. A mod that injects cards into a *base* character's pool gets a Detail button on
-that character's row, so those cards are reachable too.
+**Every card is individually blockable, base-game ones included** — your own class as well as any
+other. Only one rule is enforced: at least one card has to stay allowed. Relics remain mod-only,
+because the game has no per-character base relic pool to list (a character's starting relics are
+written straight onto the player and never pass through the filter at all).
+
+**A block is absolute.** A blocked card is never handed back to keep something running. Where the
+game would otherwise want more cards than remain — a 3-card reward, Sealed Deck's 30, the Room Full
+of Cheese's 8 commons — Card Guard reduces what the game *asks for* instead, so the screen simply
+shows fewer cards and every one of them is a card you allowed.
 
 **The pack checkbox and its detail list are one setting.** Unchecking a pack switches every item in it
 off; switching the last item off blocks the pack. When only part of a pack is allowed, the checkbox
@@ -116,7 +122,13 @@ identically and stay in sync. The host's config is exchanged in the lobby before
 - **System cards** (curse/status/token/event/quest — Wound, Burn, etc.) are never blocked.
 - Blocking is subtractive: it removes cards the game/another mod would have offered; it does not add
   other characters into the shop's native pools.
-- If a source would offer *only* disallowed cards, they pass through unchanged (crash-safety).
+- A block is absolute: blocked cards are never passed back to fill out a screen. Where a source would
+  run short, the mod reduces how many cards the game *asks for*. The settings panel enforces the one
+  floor that needs — at least one card must stay allowed.
+- **Your starting deck is not filtered.** Blocking Strike does not remove the Strikes you begin with;
+  a character's opening deck is dealt straight from its definition and never passes through the pool.
+- Card transformation is filtered too; when nothing allowed remains to transform into, the transform
+  does nothing rather than producing a blocked card.
 - Card-generation effects that create a *specific hardcoded* card (not drawn from a pool) are not
   affected.
 - Unlocked-by-progression gating is the game's own system, not this mod.

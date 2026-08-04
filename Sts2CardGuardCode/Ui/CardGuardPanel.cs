@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using Godot;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Entities.UI;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.Cards;
@@ -46,14 +47,17 @@ public static class CardGuardPanel
 
     // ── Detail (per-item) drill-down ────────────────────────
     // The right pane has two modes: the pack list, and — after pressing a pack's Detail button —
-    // that pack's individual cards/relics. Only MOD-added packs can be drilled into, because
-    // individual blocking is mod-only (a base-game card is still all-or-nothing via its pack).
+    // that pack's individual cards/relics. Character packs list every card they hold, base-game
+    // included; relic packs stay mod-only (the game has no per-character base relic pool to list).
     private enum Drill { None, ModCards, CharacterCards, ModRelics }
     private static Drill _drill = Drill.None;
     /// <summary>Mod assembly name (ModCards / ModRelics) or card-pool title (CharacterCards).</summary>
     private static string _drillKey = "";
     private static string _drillLabel = "";
     private static string _search = "";
+    /// <summary>One-shot message shown above the right pane (currently only the refused-block
+    /// notice). Cleared as soon as it has been drawn, so it never lingers into the next view.</summary>
+    private static string _notice = "";
     private static VBoxContainer? _drillItems;
     private static Label? _drillCountLbl;
     /// <summary>Item list for the open drill target. Names come from the loc layer, so resolving
@@ -483,6 +487,18 @@ public static class CardGuardPanel
         }
     }
 
+    /// <summary>Draws and consumes <see cref="_notice"/>. One-shot: the next redraw clears it, so a
+    /// refused block explains itself once instead of sticking to the pane.</summary>
+    private static void DrawNotice()
+    {
+        if (_rightList == null || _notice.Length == 0) return;
+        var l = new Label { Text = _notice, AutowrapMode = TextServer.AutowrapMode.WordSmart };
+        l.AddThemeFontSizeOverride("font_size", 14);
+        l.AddThemeColorOverride("font_color", GOLD);
+        _rightList.AddChild(l);
+        _notice = "";
+    }
+
     // ── Right: allow list for the selected character (cards or relics, per active tab) ──
     private static void RebuildRight()
     {
@@ -492,16 +508,16 @@ public static class CardGuardPanel
         _drillItems = null;
         _drillCountLbl = null;
 
+        DrawNotice();
+
         if (_drill != Drill.None) { RebuildDrill(); return; }
         if (_activeTab == 1) { RebuildRelicsRight(); return; }
 
         _rightList.AddChild(SectionLabel(Loc.T("sec_char")));
 
         // The selected character's own pack is always applied — checked and locked so applied
-        // packs are visibly ticked. A CUSTOM character's own cards are mod cards, so they can
-        // still be pruned one by one through the detail list.
-        // Own pack: the flag is locked on, but a custom character's cards are still individually
-        // blockable, so it shows the same tally as everything else.
+        // packs are visibly ticked. The FLAG is what's locked, not the contents: the detail list
+        // still prunes your own class card by card, base-game cards included.
         var ownState = PackStateOf(Drill.CharacterCards, _selected);
         var ownCb = MakeCheck(
             $"{Display(_selected)}  —  {CountOf(_selected)} " + Loc.T("cards")
@@ -519,9 +535,8 @@ public static class CardGuardPanel
             string to = ci.Title, disp = ci.Display;
             var st = PackStateOf(Drill.CharacterCards, to);
             var cb = MakePackCheck($"{disp}  —  {ci.Count} " + Loc.T("cards"), Drill.CharacterCards, to, st);
-            // Offer the detail list whenever the pack actually HAS individually blockable cards, not
-            // merely when the character itself is mod-added: a mod can inject cards into a base
-            // character's pool (Silent here carries 30), and gating on IsMod left those unreachable.
+            // Every character pack is drillable now that base cards are individually blockable; the
+            // guard only skips a pool that reported no cards at all.
             _rightList.AddChild(RowWithDetail(cb, st.Total > 0
                 ? () => EnterDrill(Drill.CharacterCards, to, disp)
                 : null));
@@ -702,8 +717,16 @@ public static class CardGuardPanel
             string label = it.Sub.Length > 0 ? $"{it.Name}  —  {it.Sub}" : it.Name;
             var cb = MakeCheck(label, DrillAllowed(id), v =>
             {
+                var before = Snapshot(_drill, _drillKey);
                 SetDrillAllowed(id, v);
                 ReconcilePack(_drill, _drillKey); // keep the pack flag in step with its items
+                if (!KeepIfAnyCardRemains(before))
+                {
+                    // The row still shows the click that was refused — redraw it from the restored
+                    // state. Deferred: we are inside the checkbox's own Toggled signal.
+                    Callable.From(RebuildRight).CallDeferred();
+                    return;
+                }
                 CardGuardConfig.Save();
                 UpdateDrillCount();
             });
@@ -739,10 +762,14 @@ public static class CardGuardPanel
     /// <summary>Allow/block every item the current search shows, then redraw the list.</summary>
     private static void SetAllVisible(bool allowed)
     {
+        var before = Snapshot(_drill, _drillKey);
         foreach (var it in VisibleDrillItems()) SetDrillAllowed(it.Id, allowed);
         ReconcilePack(_drill, _drillKey);
-        CardGuardConfig.Save();
-        FillDrillItems();
+        if (KeepIfAnyCardRemains(before)) CardGuardConfig.Save();
+        // Whole-pane redraw, because the notice sits above the list rather than inside it — and
+        // deferred, since this runs from the Allow all / Block all button's own Pressed signal and
+        // the rebuild frees that button.
+        Callable.From(RebuildRight).CallDeferred();
     }
 
     private static void UpdateDrillCount()
@@ -773,7 +800,10 @@ public static class CardGuardPanel
                 case Drill.ModRelics:
                     if (RelicGuardService.GetModRelicPacks().TryGetValue(_drillKey, out var rp))
                         foreach (var r in rp.Relics)
+                        {
+                            if (!IsListableRelic(r)) continue;
                             list.Add(new DrillItem(RelicGuardService.RelicIdOf(r), RelicName(r), RarityOf(r), null, r));
+                        }
                     break;
                 case Drill.ModCards:
                     if (CardGuardService.GetModCardPacks().TryGetValue(_drillKey, out var mp))
@@ -781,7 +811,7 @@ public static class CardGuardPanel
                             list.Add(new DrillItem(CardGuardService.CardIdOf(c), CardName(c), RarityOf(c), c, null));
                     break;
                 case Drill.CharacterCards:
-                    foreach (var c in CardGuardService.GetPoolModCards(_drillKey))
+                    foreach (var c in CardGuardService.GetPoolAllCards(_drillKey))
                         list.Add(new DrillItem(CardGuardService.CardIdOf(c), CardName(c), RarityOf(c), c, null));
                     break;
             }
@@ -1009,6 +1039,15 @@ public static class CardGuardPanel
         try { return relic.Rarity.ToString(); } catch { return string.Empty; }
     }
 
+    /// <summary>Whether a relic is worth offering as a toggle. Starter relics are excluded: a
+    /// character's starting relics are written straight onto the player (<c>StartingRelics</c> →
+    /// <c>player.Relics</c>) and never pass through the grab bag or <c>RelicCmd.Obtain</c>, so the
+    /// filter cannot touch them — listing one would be a switch that silently does nothing.</summary>
+    private static bool IsListableRelic(RelicModel relic)
+    {
+        try { return relic.Rarity != RelicRarity.Starter; } catch { return true; }
+    }
+
     // ── Pack ↔ item linkage ─────────────────────────────────
     //
     // The pack checkbox and its detail list are two views of one setting, kept to a single invariant:
@@ -1033,14 +1072,15 @@ public static class CardGuardPanel
             {
                 case Drill.ModRelics:
                     if (RelicGuardService.GetModRelicPacks().TryGetValue(key, out var rp))
-                        foreach (var r in rp.Relics) ids.Add(RelicGuardService.RelicIdOf(r));
+                        foreach (var r in rp.Relics)
+                            if (IsListableRelic(r)) ids.Add(RelicGuardService.RelicIdOf(r));
                     break;
                 case Drill.ModCards:
                     if (CardGuardService.GetModCardPacks().TryGetValue(key, out var mp))
                         foreach (var c in mp.Cards) ids.Add(CardGuardService.CardIdOf(c));
                     break;
                 case Drill.CharacterCards:
-                    foreach (var c in CardGuardService.GetPoolModCards(key)) ids.Add(CardGuardService.CardIdOf(c));
+                    foreach (var c in CardGuardService.GetPoolAllCards(key)) ids.Add(CardGuardService.CardIdOf(c));
                     break;
             }
         }
@@ -1124,6 +1164,72 @@ public static class CardGuardPanel
         SetPackBlocked(kind, key, !anyAllowed);
     }
 
+    // ── "At least one card survives" ────────────────────────
+    //
+    // The one rule the panel enforces, and the only one it needs. A block is absolute — the filter
+    // never hands a blocked card back — which works because wherever the game wants more cards than
+    // remain, the DEMAND is clamped instead (see Patches/CardFilterPatches + CardSelectPatches).
+    // That has exactly one floor: something has to remain. Block literally every card and
+    // CardGuardService.Filter runs out of substitutes and falls through to "pass everything
+    // through unfiltered" — the one path where a blocked card could still surface. Refusing the
+    // last block keeps that path unreachable, and needs no per-content minimums (30 for Sealed
+    // Deck, 8 for Gorge, …) because those are handled by clamping.
+
+    /// <summary>Distinct cards that can still appear for the selected character, across every card
+    /// pack. By id, since a mod card injected into a base pool is listed under both packs.</summary>
+    private static int AllowedCardTotal()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var ci in CardGuardService.GetAllCharacters())
+                CollectAllowed(Drill.CharacterCards, ci.Title, seen);
+            foreach (var kv in CardGuardService.GetModCardPacks())
+                if (!CardGuardService.IsCharacterMod(kv.Key))
+                    CollectAllowed(Drill.ModCards, kv.Key, seen);
+        }
+        catch (Exception ex)
+        {
+            // Never let a scan failure turn into "you may not block this" — fail permissive.
+            MainFile.Logger.Warn($"[{MainFile.ModId}] allowed-card tally failed: {ex.Message}");
+            return int.MaxValue;
+        }
+        return seen.Count;
+    }
+
+    private static void CollectAllowed(Drill kind, string key, HashSet<string> into)
+    {
+        if (PackBlocked(kind, key)) return;
+        foreach (var id in PackItemIds(kind, key))
+            if (ItemAllowed(kind, id)) into.Add(id);
+    }
+
+    /// <summary>Everything one pack's toggles can change, so a refused edit can be put back exactly
+    /// as it was — including the pack flag, which <see cref="ApplyPackToggle"/> moves too.</summary>
+    private readonly record struct PackSnapshot(Drill Kind, string Key, bool Blocked, List<(string Id, bool Allowed)> Items);
+
+    private static PackSnapshot Snapshot(Drill kind, string key)
+    {
+        var items = new List<(string, bool)>();
+        foreach (var id in PackItemIds(kind, key)) items.Add((id, ItemAllowed(kind, id)));
+        return new PackSnapshot(kind, key, PackBlocked(kind, key), items);
+    }
+
+    /// <summary>Keeps the edit if any card survives it; otherwise puts <paramref name="before"/> back
+    /// and raises the notice. Relic edits are never refused — relics can't empty the card pool, and
+    /// an empty relic bag already resolves to the game's own fallback relic.</summary>
+    private static bool KeepIfAnyCardRemains(PackSnapshot before)
+    {
+        if (before.Kind == Drill.ModRelics) return true;
+        if (AllowedCardTotal() > 0) return true;
+
+        foreach (var (id, allowed) in before.Items) SetItemAllowed(before.Kind, id, allowed);
+        SetPackBlocked(before.Kind, before.Key, before.Blocked);
+        _notice = Loc.T("min_one");
+        MainFile.Logger.Info($"[{MainFile.ModId}] refused a block that would leave {_selected} with no cards at all.");
+        return false;
+    }
+
     private static string CountsSuffix(PackState s) =>
         s.Total == 0 ? string.Empty : Loc.F("counts_fmt", s.Allowed, s.BlockedCount);
 
@@ -1137,8 +1243,9 @@ public static class CardGuardPanel
         bool on = s.Total == 0 ? !s.Blocked : s.Allowed > 0;
         var cb = MakeCheck(label + CountsSuffix(s), on, v =>
         {
+            var before = Snapshot(kind, key);
             ApplyPackToggle(kind, key, v);
-            CardGuardConfig.Save();
+            if (KeepIfAnyCardRemains(before)) CardGuardConfig.Save();
             // Deferred: this fires from the checkbox's own Toggled signal, and the rebuild frees it.
             Callable.From(RebuildRight).CallDeferred();
         });
