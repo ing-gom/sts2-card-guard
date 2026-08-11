@@ -990,14 +990,36 @@ internal static class SoloTest
     private static async Task<List<OfferedOption>?> OfferedPools(Player player)
         => (await ProbeEvent(player))?.Options;
 
+    /// <summary>
+    /// Call <c>EventModel.BeginEvent</c> without baking its parameter list into this assembly: the
+    /// game branches disagree on it (`public` takes (Player, bool), a beta build also took a combat
+    /// synchronizer), and a direct call stops compiling the moment the local game updates. The probe
+    /// only reads the generated options, so the extra parameters get their harmless defaults —
+    /// the player, false for the flags, null for the rest.
+    /// </summary>
+    private static async Task BeginEventCompat(EventModel ev, Player player)
+    {
+        var m = ev.GetType().GetMethod("BeginEvent", BindingFlags.Public | BindingFlags.Instance)
+                ?? throw new MissingMethodException("EventModel.BeginEvent not found on this game build");
+        var ps = m.GetParameters();
+        var args = new object?[ps.Length];
+        for (int i = 0; i < ps.Length; i++)
+        {
+            var t = ps[i].ParameterType;
+            args[i] = t.IsAssignableFrom(typeof(Player)) ? player
+                    : t == typeof(bool) ? false
+                    : t.IsValueType ? Activator.CreateInstance(t)
+                    : null;
+        }
+        await (Task)m.Invoke(ev, args)!;
+    }
+
     private static async Task<EventProbe?> ProbeEvent(Player player)
     {
         try
         {
             var ev = (ColorfulPhilosophers)ModelDb.Event<ColorfulPhilosophers>().MutableClone();
-            // combatSynchronizer is null: this probe only reads the event's generated options and
-            // never runs its combat. (The parameter was added to BeginEvent by a game update.)
-            await ev.BeginEvent(player, null, isPreFinished: false);
+            await BeginEventCompat(ev, player);
             var options = new List<OfferedOption>();
             foreach (var opt in ev.CurrentOptions)
             {

@@ -21,10 +21,27 @@ internal static class CardGuardNet
     /// <summary>"CGSH" — sanity marker written as the first field of every Card Guard message.</summary>
     public const int Magic = 0x43475348;
 
+    /// <summary>
+    /// "CGHI" — marker for the client's initial request (see <see cref="CardGuardAckMessage"/>).
+    ///
+    /// Carried in the <c>magic</c> field of the ack message rather than as a new message type:
+    /// <c>NetTypeCache</c> assigns wire IDs by sorting the game's AND every mod's
+    /// <c>INetMessage</c> types together by type name, so adding a type shifts the IDs of the
+    /// game's own messages for anyone whose mod set differs. In practice the game already forbids
+    /// that lobby — <c>ModManager.GetGameplayRelevantModNameList</c> keys on <c>id + "-" + version</c>
+    /// and a mismatch is refused with ModMismatch before the join completes — so this is belt and
+    /// braces, not a live hazard. It also keeps the change to one constant.
+    /// </summary>
+    public const int HelloMagic = 0x43474849;
+
     /// <summary>Wire-format version. Bump on any serialization change; mismatches are ignored.
     /// v2 added the global relic-mod block list. v3 added the individual card / relic block lists —
     /// a v2 peer's config is discarded on receipt, so a mixed-version lobby simply runs unfiltered
-    /// rather than filtering differently on each side.</summary>
+    /// rather than filtering differently on each side.
+    ///
+    /// NOT bumped for the v0.7.0 client-request handshake: that change adds no field to either
+    /// message, only a second magic value. Keeping the version means a mod-updated client can still
+    /// use an older host's unsolicited broadcast when it happens to arrive in time.</summary>
     public const int Protocol = 3;
 
     /// <summary>Defensive cap on decoded collection sizes (guards a misaligned/foreign packet).</summary>
@@ -106,10 +123,21 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
 }
 
 /// <summary>
-/// Peer → host. Acknowledges receipt of a matching-protocol <see cref="CardGuardConfigMessage"/>.
-/// The host only activates filtering for the run once every connected peer has acked, so a peer
-/// that lacks the mod (or the matching version) leaves filtering OFF for everyone — safe, never a
-/// desync.
+/// Peer → host, in two flavours distinguished by <see cref="magic"/>:
+///
+/// <list type="bullet">
+/// <item><see cref="CardGuardNet.HelloMagic"/> — "my lobby exists and my handlers are registered,
+/// send me your config". The client sends this itself instead of relying on the host's unsolicited
+/// broadcast, which the host fires from <c>StartRunLobby.PlayerConnected</c> while the joining
+/// client is still several frames away from constructing its own lobby: the config packet then
+/// reaches a client with no handler registered for it and <c>NetMessageBus</c> drops it outright
+/// (it is not buffered). In a two-player lobby no further <c>PlayerConnected</c> ever fires, so
+/// there was no second chance and filtering stayed off for the whole run.</item>
+/// <item><see cref="CardGuardNet.Magic"/> — acknowledges receipt of a matching-protocol
+/// <see cref="CardGuardConfigMessage"/>. The host only activates filtering for the run once every
+/// connected peer has acked, so a peer that lacks the mod (or the matching version) leaves
+/// filtering OFF for everyone — safe, never a desync.</item>
+/// </list>
 /// </summary>
 internal struct CardGuardAckMessage : INetMessage, IPacketSerializable
 {

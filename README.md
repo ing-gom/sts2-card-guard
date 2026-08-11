@@ -111,9 +111,11 @@ and desync. To prevent this, **in a networked run every player automatically use
 Guard settings** (each client's own settings are ignored for that run) — so all peers filter
 identically and stay in sync. The host's config is exchanged in the lobby before the run starts.
 
-- **Both players must have the mod** (matching version). If a peer lacks it, or the host's config
+- **Both players must have the mod, on v0.7.0 or newer.** If a peer lacks it, or the host's config
   can't be confirmed, Card Guard **turns filtering off for that run** rather than risk a desync — it
-  never causes a disconnect, it just does nothing that run.
+  never causes a disconnect, it just does nothing that run. Before v0.7.0 the config exchange lost a
+  race against the joining client and this fallback triggered in every two-player lobby, so co-op
+  filtering never actually engaged.
 - Your saved settings are untouched; the host-follow behavior only applies inside a co-op run.
 - Singleplayer is unaffected (uses your own settings as before).
 

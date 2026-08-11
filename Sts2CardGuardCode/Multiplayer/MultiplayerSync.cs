@@ -18,7 +18,10 @@ namespace Sts2CardGuard.Multiplayer;
 /// host's config.
 ///
 /// How it stays race-free: the host's config is exchanged during the LOBBY phase (a long, reliable
-/// window) and the "filtering on/off + which config" decision is locked ONCE, at run start, before
+/// window). The client PULLS it — it announces itself once its lobby exists, because the host's
+/// unsolicited broadcast fires from <c>PlayerConnected</c> while the joining client is still
+/// constructing that lobby, and a message with no registered handler is dropped, not buffered.
+/// The "filtering on/off + which config" decision is then locked ONCE, at run start, before
 /// any lockstep action executes. There is no in-run flag flip, so no message-timing race can cause
 /// a mid-run divergence. If anything is uncertain at lock-in (peer hasn't acked, host config never
 /// arrived, protocol mismatch), the side falls back to pass-through (no filtering) — the mod does
@@ -84,7 +87,15 @@ internal static class MultiplayerSync
                 SendConfigToAll(net);
                 SubscribePlayerConnected(lobby);
             }
-            // Client: nothing to do proactively — the host pushes config on our PlayerConnected.
+            else if (net.Type == NetGameType.Client)
+            {
+                // Ask for the config now that our handler is registered. The host's own broadcast
+                // fires the instant it accepts our join request — before this lobby exists — so it
+                // lands on a client with no handler and is discarded (NetMessageBus drops, never
+                // buffers, messages with no registered handler). Pulling closes that window; see
+                // CardGuardAckMessage.
+                SendHello(net);
+            }
 
             Log.Info($"multiplayer lobby detected (type={net.Type}); host-config sync armed.");
         }
@@ -166,6 +177,17 @@ internal static class MultiplayerSync
         catch (Exception ex) { Log.Warn($"SendConfigToAll failed: {ex.Message}"); }
     }
 
+    /// <summary>Client: request the host's config now that we can receive it.</summary>
+    private static void SendHello(INetGameService net)
+    {
+        try
+        {
+            net.SendMessage(new CardGuardAckMessage { magic = CardGuardNet.HelloMagic, protocol = CardGuardNet.Protocol });
+            Log.Info("requested host config (client hello).");
+        }
+        catch (Exception ex) { Log.Warn($"SendHello failed: {ex.Message}"); }
+    }
+
     // ---- Handlers ----
 
     private static void OnConfigReceived(CardGuardConfigMessage msg, ulong senderId)
@@ -199,7 +221,24 @@ internal static class MultiplayerSync
 
     private static void OnAckReceived(CardGuardAckMessage msg, ulong senderId)
     {
-        if (msg.magic != CardGuardNet.Magic || msg.protocol != CardGuardNet.Protocol) return;
+        if (msg.protocol != CardGuardNet.Protocol) return;
+
+        // A joining client announcing it can now receive: re-broadcast. Idempotent — a peer that
+        // already holds the config just re-stores identical values and re-acks, and nothing reads
+        // those values until lock-in at run start.
+        if (msg.magic == CardGuardNet.HelloMagic)
+        {
+            INetGameService? net;
+            lock (_gate) net = _net;
+            if (net != null && net.Type == NetGameType.Host)
+            {
+                Log.Info($"peer {senderId} requested config → re-broadcasting.");
+                SendConfigToAll(net);
+            }
+            return;
+        }
+
+        if (msg.magic != CardGuardNet.Magic) return;
         lock (_gate) { _ackedPeers.Add(senderId); }
         Log.Info($"peer {senderId} acked config.");
     }

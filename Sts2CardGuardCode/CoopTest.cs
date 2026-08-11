@@ -451,6 +451,13 @@ internal static class CoopTest
         // than let "victimInBag=0" read as proof when there was never anything there to remove.
         bool bagApplicable = victim + mate > 0;
 
+        // Assert the run is actually being filtered. Without this the HOST verdict is vacuous: it
+        // staged the blocks locally, so OverrideApplied() reads them back and reports true even when
+        // the lock-in fell through to pass-through and nothing is being filtered at all. Measured:
+        // with the client's config pull disabled (pre-v0.7.0), host passThrough=True still produced
+        // "RESULT: OK" while only the JOIN side caught the failure.
+        bool filtering = !RelicGuardService.IsPassThrough && !CardGuardService.IsPassThrough;
+        W($"{role}: assert filtering ACTIVE this run (not pass-through) = {filtering}");
         W($"{role}: assert host block in EFFECT here — relics={ovrRelics}, cards={ovrCards}");
         W($"{role}: assert individually-blocked ancient NOT held after networked grant = {!heldAncient}"
           + $"  [RelicCmd.Obtain swap under lockstep, ancient={_victimAncient ?? "(none)"}]");
@@ -465,7 +472,7 @@ internal static class CoopTest
         W($"{role}: assert session alive after room transition = {alive}");
 
         bool bagOk = !bagApplicable || (victim == 0 && mate > 0);
-        return ovrRelics && ovrCards && !heldAncient && bagOk && alive;
+        return filtering && ovrRelics && ovrCards && !heldAncient && bagOk && alive;
     }
 
     private static void CollectBag(RelicGrabBag? bag, List<string> ids)
