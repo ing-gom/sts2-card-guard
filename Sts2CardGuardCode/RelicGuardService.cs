@@ -191,16 +191,18 @@ internal static class RelicGuardService
     }
 
     /// <summary>Whether <paramref name="relic"/> is blocked for the character pool <paramref name="characterTitle"/>.
-    /// Blocked when EITHER the relic is individually blocked or its whole mod pack is. Base relics: never.</summary>
+    /// Blocked when EITHER the relic is individually blocked or its whole mod pack is — under that
+    /// character's own scope or under <see cref="CardGuardService.AllScope"/>. Base relics: never.</summary>
     public static bool IsRelicBlockedForCharacter(RelicModel relic, string characterTitle)
     {
         if (_mpPassThrough) return false;
         if (string.IsNullOrEmpty(characterTitle)) return false;
         if (!IsModRelic(relic)) return false;
-        if (!GetRelicAllowed(characterTitle, RelicIdOf(relic))) return true;
+        string rid = RelicIdOf(relic);
+        if (!GetRelicAllowed(characterTitle, rid) || !GetRelicAllowed(CardGuardService.AllScope, rid)) return true;
         var mn = ModNameOf(relic);
         if (string.IsNullOrEmpty(mn)) return false;
-        return !GetModAllowed(characterTitle, mn);
+        return !GetModAllowed(characterTitle, mn) || !GetModAllowed(CardGuardService.AllScope, mn);
     }
 
     /// <summary>Whether <paramref name="relic"/> is blocked for ANY of the given characters — used for the
@@ -220,6 +222,7 @@ internal static class RelicGuardService
     public static bool IsModBlockedForAny(string modName, IEnumerable<string> characterTitles)
     {
         if (_mpPassThrough || string.IsNullOrEmpty(modName)) return false;
+        if (!GetModAllowed(CardGuardService.AllScope, modName)) return true;
         foreach (var t in characterTitles)
             if (!GetModAllowed(t, modName)) return true;
         return false;

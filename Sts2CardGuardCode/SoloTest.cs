@@ -148,14 +148,15 @@ internal static class SoloTest
             bool okPhil = await RunPhilosophersOptionTest(player);
             bool okPhilEdge = await RunPhilosophersEdgeTest(player);
             bool okBaseClamp = RunBaseCardClampTest(player);
+            bool okAllScope = RunAllScopeTest(player);
             await ShotPanel(player);
 
             bool ok = okBag && okRelicOne && okCardOne && okCfg && okLink && okPhil && okPhilEdge
-                      && okBaseClamp && _hoverOk;
+                      && okBaseClamp && okAllScope && _hoverOk;
             W($"=== summary: grabbag/ancient={okBag}, individual-relic={okRelicOne}, "
               + $"individual-card={okCardOne}, config-roundtrip={okCfg}, pack-linkage={okLink}, "
               + $"philosophers={okPhil}, philosophers-edge={okPhilEdge}, base-clamp={okBaseClamp}, "
-              + $"hover-preview={_hoverOk} ===");
+              + $"all-scope={okAllScope}, hover-preview={_hoverOk} ===");
 
             await Shot("2_final");
             W("=== solo test done ===");
@@ -540,6 +541,96 @@ internal static class SoloTest
         return baseBlockOk && clamp2Ok && clamp1Ok && prefsOk;
     }
 
+    /// <summary>
+    /// The all-characters scope (v0.8.0). A block stored under <see cref="CardGuardService.AllScope"/>
+    /// must bite for whoever is playing, WITHOUT any entry under that character's own key — the exact
+    /// thing the per-character-only design could not express, and the reason a user could configure
+    /// one scope and see the cards anyway. Also checks the scopes stay independent (clearing the
+    /// character's own key does not clear the global one) and that the reserved key survives the
+    /// config round trip. Restores every setting it touches and never calls Save.
+    /// </summary>
+    private static bool RunAllScopeTest(Player player)
+    {
+        Step("all-characters scope: pick a probe card");
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+        var pool = player.Character?.CardPool;
+        if (pool == null) { W("no character pool — SKIP."); return true; }
+
+        CardModel? probe;
+        try
+        {
+            probe = pool.GetUnlockedCards(player.UnlockState, player.RunState.CardMultiplayerConstraint)
+                        .FirstOrDefault(c => c != null
+                            && CardGuardService.GetCardAllowed(charTitle, CardGuardService.CardIdOf(c)));
+        }
+        catch (Exception e) { W($"pool enumeration failed: {e.Message} — SKIP."); return true; }
+        if (probe == null) { W("no allowed card in the own pool — SKIP."); return true; }
+
+        string probeId = CardGuardService.CardIdOf(probe);
+        const string All = CardGuardService.AllScope;
+
+        // A second character to exercise the pack-level (cross) block through the global scope.
+        string? otherTitle = CardGuardService.GetAllCharacters()
+            .Select(c => c.Title)
+            .FirstOrDefault(t => !string.Equals(t, charTitle, StringComparison.OrdinalIgnoreCase));
+
+        bool cardOk = false, isolationOk = false, crossOk = true, relicOk = true, tripOk = false;
+        var relicPack = RelicGuardService.GetModRelicPacks().Keys.FirstOrDefault();
+        try
+        {
+            // (1) global block only — nothing under the character's own key — still hides the card.
+            W($"probe card {probe.Id} (character key '{charTitle}' left untouched)");
+            CardGuardService.SetCardAllowed(All, probeId, false);
+            bool hidden = !CardGuardService.WouldAppear(probe, player);
+            bool ownKeyClean = CardGuardService.GetCardAllowed(charTitle, probeId);
+            cardOk = hidden && ownKeyClean;
+            W($"assert: global block hides the card = {hidden}, own key untouched = {ownKeyClean}");
+
+            // (2) the two scopes are independent: allowing it for this character must NOT win over
+            // the global block (a per-character tick cannot undo an all-characters one).
+            CardGuardService.SetCardAllowed(charTitle, probeId, true);
+            isolationOk = !CardGuardService.WouldAppear(probe, player);
+            W($"assert: per-character allow does not override the global block = {isolationOk}");
+
+            // (3) pack level: a character blocked globally is blocked for the run's character too.
+            if (otherTitle != null)
+            {
+                CardGuardService.SetCrossAllowed(All, otherTitle, false);
+                crossOk = CardGuardService.IsCrossCharacterBlocked(player, otherTitle)
+                          && !CardGuardService.GetCrossAllowedEffective(charTitle, otherTitle);
+                W($"assert: '{otherTitle}' blocked globally is blocked for '{charTitle}' = {crossOk}");
+            }
+            else W("only one character installed — cross-block sub-check SKIPPED.");
+
+            // (4) relics honour the same scope.
+            if (relicPack != null)
+            {
+                RelicGuardService.SetModAllowed(All, relicPack, false);
+                var r = RelicGuardService.GetModRelicPacks()[relicPack].Relics.FirstOrDefault();
+                relicOk = r != null && RelicGuardService.IsRelicBlockedForCharacter(r, charTitle);
+                W($"assert: relic mod '{relicPack}' blocked globally is blocked for '{charTitle}' = {relicOk}");
+            }
+            else W("no relic-adding mod — relic sub-check SKIPPED.");
+
+            // (5) the reserved key is carried by the save/co-op snapshot like any other scope.
+            var snap = CardGuardService.SnapshotLocalBlocks();
+            tripOk = CardGuardService.GetConfiguredTitles().Contains(All, StringComparer.Ordinal)
+                     && snap.card.TryGetValue(All, out var ids) && ids.Contains(probeId);
+            W($"assert: '{All}' scope present in the persisted/broadcast snapshot = {tripOk}");
+        }
+        catch (Exception e) { W($"all-scope exception: {e}"); }
+        finally
+        {
+            CardGuardService.SetCardAllowed(All, probeId, true);
+            CardGuardService.SetCardAllowed(charTitle, probeId, true);
+            if (otherTitle != null) CardGuardService.SetCrossAllowed(All, otherTitle, true);
+            if (relicPack != null) RelicGuardService.SetModAllowed(All, relicPack, true);
+            W("restored all-characters scope blocks");
+        }
+
+        return cardOk && isolationOk && crossOk && relicOk && tripOk;
+    }
+
     /// <summary>Asks the real reward factory for <paramref name="ask"/> cards and checks it came back
     /// with exactly <paramref name="expect"/>, every one of them allowed. A throw here is the failure
     /// the clamp exists to prevent ("couldn't generate a valid rarity").</summary>
@@ -649,6 +740,7 @@ internal static class SoloTest
             // An all-allowed screenshot can't distinguish "renders correctly" from "state ignored".
             var staged = new List<string>();
             var stagedCards = new List<string>();
+            var stagedGlobal = new List<string>();
             try
             {
                 if (relicMod != null && RelicGuardService.GetModRelicPacks().TryGetValue(relicMod, out var rp))
@@ -695,6 +787,31 @@ internal static class SoloTest
                     await Shot("5_panel_cards");
 
                     _hoverOk = await RunHoverPreviewTest(tree, cardMod);
+
+                    // The all-characters scope, both ways round: once with it selected (no "own"
+                    // row — every character pack is a normal blockable row), and once from the
+                    // character scope, where the same blocks must show as locked rows. Two shots
+                    // because "the scope stores it" and "the other scope shows it" are separate
+                    // failures, and only the second one is what the bug report was about.
+                    foreach (var c in mp.Cards.Skip(3).Take(2))
+                    {
+                        string id = CardGuardService.CardIdOf(c);
+                        if (id.Length == 0) continue;
+                        CardGuardService.SetCardAllowed(CardGuardService.AllScope, id, false);
+                        stagedGlobal.Add(id);
+                    }
+                    W($"staged {stagedGlobal.Count} all-characters card block(s) for the scope shots");
+
+                    Ui.CardGuardPanel.TestSelect(CardGuardService.AllScope);
+                    Ui.CardGuardPanel.TestOpen(tree.Root, 0, null, false);
+                    await Task.Delay(900);
+                    await Shot("8_panel_allscope");
+
+                    Ui.CardGuardPanel.TestSelect(charTitle);
+                    Ui.CardGuardPanel.TestOpen(tree.Root, 0, cardMod, false);
+                    await Task.Delay(900);
+                    await Shot("9_panel_allscope_locked");
+                    W($"all-characters scope shots taken (scope view + locked rows under '{charTitle}')");
                 }
             }
             finally
@@ -703,6 +820,9 @@ internal static class SoloTest
                     try { RelicGuardService.SetRelicAllowed(charTitle, id, true); } catch { }
                 foreach (var id in stagedCards)
                     try { CardGuardService.SetCardAllowed(charTitle, id, true); } catch { }
+                foreach (var id in stagedGlobal)
+                    try { CardGuardService.SetCardAllowed(CardGuardService.AllScope, id, true); } catch { }
+                Ui.CardGuardPanel.TestSelect(charTitle);
                 Ui.CardGuardPanel.TestClose();
             }
             await Task.Delay(400);

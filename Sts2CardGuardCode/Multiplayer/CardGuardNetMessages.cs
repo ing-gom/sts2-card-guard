@@ -41,8 +41,13 @@ internal static class CardGuardNet
     ///
     /// NOT bumped for the v0.7.0 client-request handshake: that change adds no field to either
     /// message, only a second magic value. Keeping the version means a mod-updated client can still
-    /// use an older host's unsolicited broadcast when it happens to arrive in time.</summary>
-    public const int Protocol = 3;
+    /// use an older host's unsolicited broadcast when it happens to arrive in time.
+    ///
+    /// v4 (v0.8.0) adds the all-characters scope. No field changed — the block maps already carry
+    /// arbitrary keys — but their MEANING did: a v3 peer would read the "*" key as a character named
+    /// "*" and match it against nothing, so it would filter differently from the host instead of
+    /// identically. Bumping makes such a lobby run unfiltered rather than out of step.</summary>
+    public const int Protocol = 4;
 
     /// <summary>Defensive cap on decoded collection sizes (guards a misaligned/foreign packet).</summary>
     private const int MaxEntries = 100_000;

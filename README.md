@@ -57,7 +57,10 @@ at all, so a room is not spent on an event that would end the moment you walked 
 The character-select screen gets a **Card / Relic Filter** button (bottom-right). It opens a full-screen
 panel (no ModConfig dependency):
 
-- **Left** — pick the character you are configuring for (base **and** custom characters).
+- **Left** — pick the scope you are configuring: **★ All characters** at the top, or a single
+  character (base **and** custom). A block made under ★ All characters holds no matter who you
+  play; the same block shows up, locked, in every character's own list, so a missing card is always
+  traceable to the scope that removed it. (v0.8.0)
 - **Right** — the card packs for that character, each with a card count:
   - **Character card packs** — the selected character's own pack (always on) + every other character
     (base and custom). Uncheck one to block that class's cards.
@@ -65,7 +68,7 @@ panel (no ModConfig dependency):
     its card count and how many are colorless. Uncheck to block.
 
 **Default is permissive: every pack is checked (allowed).** Uncheck a pack to block it for that
-character. Custom characters appear only in the character section (one checkbox controls them).
+scope. Custom characters appear only in the character section (one checkbox controls them).
 
 Settings persist to `Settings/card_guard_config.txt` (JSON) next to the mod DLL and apply from the
 first screen on the next launch. English, Korean and Simplified Chinese are supported (follows the game language).

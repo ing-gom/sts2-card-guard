@@ -192,6 +192,7 @@ public static class CardGuardPanel
         try
         {
             if (_screen == null || !GodotObject.IsInstanceValid(_screen)) return;
+            if (IsAllScope) return; // deliberately picked "all characters" — don't drag it back to one class
             var f = _screen.GetType().GetField("_selectedButton", BindingFlags.NonPublic | BindingFlags.Instance);
             if (f?.GetValue(_screen) is not NCharacterSelectButton btn || !GodotObject.IsInstanceValid(btn)) return;
             if (btn.IsRandom) return; // Random has no fixed pool to configure — keep prior selection
@@ -469,13 +470,18 @@ public static class CardGuardPanel
         for (int i = _leftList.GetChildCount() - 1; i >= 0; i--)
             _leftList.GetChild(i).QueueFree();
 
-        foreach (var ci in CardGuardService.GetAllCharacters())
+        // The all-characters scope sits first: it is the one people reach for when they mean "never
+        // show me this card again", and a per-character list with no such row invites configuring
+        // one character and then playing another.
+        var entries = new List<(string Title, string Display)> { (CardGuardService.AllScope, Loc.T("all_chars")) };
+        foreach (var ci in CardGuardService.GetAllCharacters()) entries.Add((ci.Title, ci.Display));
+
+        foreach (var (t, disp) in entries)
         {
-            string t = ci.Title;
             bool sel = string.Equals(t, _selected, StringComparison.OrdinalIgnoreCase);
             var b = new Button
             {
-                Text = (sel ? "▸ " : "   ") + ci.Display,
+                Text = (sel ? "▸ " : "   ") + disp,
                 Alignment = HorizontalAlignment.Left,
                 SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
                 CustomMinimumSize = new Vector2(0, 38),
@@ -518,16 +524,21 @@ public static class CardGuardPanel
         // The selected character's own pack is always applied — checked and locked so applied
         // packs are visibly ticked. The FLAG is what's locked, not the contents: the detail list
         // still prunes your own class card by card, base-game cards included.
-        var ownState = PackStateOf(Drill.CharacterCards, _selected);
-        var ownCb = MakeCheck(
-            $"{Display(_selected)}  —  {CountOf(_selected)} " + Loc.T("cards")
-            + Loc.T("own_suffix") + CountsSuffix(ownState),
-            true, _ => { });
-        ownCb.Disabled = true;
-        ownCb.SetPressedNoSignal(true);
-        _rightList.AddChild(RowWithDetail(ownCb, ownState.Total > 0
-            ? () => EnterDrill(Drill.CharacterCards, _selected, Display(_selected))
-            : null));
+        // The all-characters scope has no "own" pack: from there every character pack is a normal
+        // blockable row (blocking one there blocks it for everyone), so this row is skipped.
+        if (!IsAllScope)
+        {
+            var ownState = PackStateOf(Drill.CharacterCards, _selected);
+            var ownCb = MakeCheck(
+                $"{Display(_selected)}  —  {CountOf(_selected)} " + Loc.T("cards")
+                + Loc.T("own_suffix") + CountsSuffix(ownState),
+                true, _ => { });
+            ownCb.Disabled = true;
+            ownCb.SetPressedNoSignal(true);
+            _rightList.AddChild(RowWithDetail(ownCb, ownState.Total > 0
+                ? () => EnterDrill(Drill.CharacterCards, _selected, Display(_selected))
+                : null));
+        }
 
         foreach (var ci in CardGuardService.GetAllCharacters())
         {
@@ -715,7 +726,13 @@ public static class CardGuardPanel
         {
             string id = it.Id;
             string label = it.Sub.Length > 0 ? $"{it.Name}  —  {it.Sub}" : it.Name;
-            var cb = MakeCheck(label, DrillAllowed(id), v =>
+
+            // Blocked for every character: show it blocked and lock the row. Leaving it editable
+            // would offer a tick that cannot bring the card back — the global block still holds.
+            bool lockedByAll = ItemBlockedGlobally(_drill, id);
+            if (lockedByAll) label += Loc.T("all_mark");
+
+            var cb = MakeCheck(label, !lockedByAll && DrillAllowed(id), v =>
             {
                 var before = Snapshot(_drill, _drillKey);
                 SetDrillAllowed(id, v);
@@ -730,6 +747,7 @@ public static class CardGuardPanel
                 CardGuardConfig.Save();
                 UpdateDrillCount();
             });
+            if (lockedByAll) cb.Disabled = true;
 
             Control row = cb;
             if (it.Relic != null)
@@ -763,7 +781,10 @@ public static class CardGuardPanel
     private static void SetAllVisible(bool allowed)
     {
         var before = Snapshot(_drill, _drillKey);
-        foreach (var it in VisibleDrillItems()) SetDrillAllowed(it.Id, allowed);
+        // Rows locked by the all-characters scope are skipped: they are drawn disabled, and writing
+        // a per-character setting under them would change nothing while looking like it did.
+        foreach (var it in VisibleDrillItems())
+            if (!ItemBlockedGlobally(_drill, it.Id)) SetDrillAllowed(it.Id, allowed);
         ReconcilePack(_drill, _drillKey);
         if (KeepIfAnyCardRemains(before)) CardGuardConfig.Save();
         // Whole-pane redraw, because the notice sits above the list rather than inside it — and
@@ -826,9 +847,13 @@ public static class CardGuardPanel
         return list;
     }
 
-    private static bool DrillAllowed(string id) => _drill == Drill.ModRelics
-        ? RelicGuardService.GetRelicAllowed(_selected, id)
-        : CardGuardService.GetCardAllowed(_selected, id);
+    /// <summary>Whether the drilled item can still appear for the selected scope — its own setting
+    /// AND the all-characters one, so the header count matches what the rows show.</summary>
+    private static bool DrillAllowed(string id) =>
+        !ItemBlockedGlobally(_drill, id)
+        && (_drill == Drill.ModRelics
+            ? RelicGuardService.GetRelicAllowed(_selected, id)
+            : CardGuardService.GetCardAllowed(_selected, id));
 
     private static void SetDrillAllowed(string id, bool allowed)
     {
@@ -836,13 +861,13 @@ public static class CardGuardPanel
         else CardGuardService.SetCardAllowed(_selected, id, allowed);
     }
 
-    /// <summary>Whether the pack being drilled into is itself still allowed for this character.</summary>
-    private static bool PackCurrentlyAllowed() => _drill switch
+    /// <summary>Whether the pack being drilled into is itself still allowed for this scope.</summary>
+    private static bool PackCurrentlyAllowed() => !PackBlockedGlobally(_drill, _drillKey) && _drill switch
     {
         Drill.ModRelics => RelicGuardService.GetModAllowed(_selected, _drillKey),
         Drill.ModCards => CardGuardService.GetModAllowed(_selected, _drillKey),
         // Your own pack is never cross-blocked; another character's is.
-        Drill.CharacterCards => string.Equals(_drillKey, _selected, StringComparison.OrdinalIgnoreCase)
+        Drill.CharacterCards => IsOwnPack(Drill.CharacterCards, _drillKey)
                                 || CardGuardService.GetCrossAllowed(_selected, _drillKey),
         _ => true,
     };
@@ -1089,9 +1114,44 @@ public static class CardGuardPanel
         return ids;
     }
 
-    /// <summary>Your own character's pack always applies — it has no blockable pack flag.</summary>
+    /// <summary>Whether the panel is editing the all-characters scope rather than one character.</summary>
+    private static bool IsAllScope =>
+        string.Equals(_selected, CardGuardService.AllScope, StringComparison.Ordinal);
+
+    /// <summary>Your own character's pack always applies — it has no blockable pack flag. The
+    /// all-characters scope has no own pack (its key is never a pool title), so every pack is
+    /// blockable there.</summary>
     private static bool IsOwnPack(Drill kind, string key) =>
-        kind == Drill.CharacterCards && string.Equals(key, _selected, StringComparison.OrdinalIgnoreCase);
+        kind == Drill.CharacterCards && !IsAllScope
+        && string.Equals(key, _selected, StringComparison.OrdinalIgnoreCase);
+
+    // ── All-characters scope, seen from a character scope ───
+    //
+    // A block set for every character still has to be visible (and un-editable) while a single
+    // character is selected — otherwise the row would show "allowed" for a card that can never
+    // appear, and un-ticking it would write a per-character block that changes nothing.
+
+    /// <summary>Whether this pack is blocked by the all-characters scope while a character is selected.</summary>
+    private static bool PackBlockedGlobally(Drill kind, string key)
+    {
+        if (IsAllScope) return false;
+        return kind switch
+        {
+            Drill.ModRelics => !RelicGuardService.GetModAllowed(CardGuardService.AllScope, key),
+            Drill.ModCards => !CardGuardService.GetModAllowed(CardGuardService.AllScope, key),
+            Drill.CharacterCards => !CardGuardService.GetCrossAllowed(CardGuardService.AllScope, key),
+            _ => false,
+        };
+    }
+
+    /// <summary>Whether this item is blocked by the all-characters scope while a character is selected.</summary>
+    private static bool ItemBlockedGlobally(Drill kind, string id)
+    {
+        if (IsAllScope) return false;
+        return kind == Drill.ModRelics
+            ? !RelicGuardService.GetRelicAllowed(CardGuardService.AllScope, id)
+            : !CardGuardService.GetCardAllowed(CardGuardService.AllScope, id);
+    }
 
     private static bool PackBlocked(Drill kind, string key) => kind switch
     {
@@ -1133,11 +1193,11 @@ public static class CardGuardPanel
     private static PackState PackStateOf(Drill kind, string key)
     {
         var ids = PackItemIds(kind, key);
-        bool blocked = PackBlocked(kind, key);
+        bool blocked = PackBlocked(kind, key) || PackBlockedGlobally(kind, key);
         int allowed = 0;
         if (!blocked)
             foreach (var id in ids)
-                if (ItemAllowed(kind, id)) allowed++;
+                if (ItemAllowed(kind, id) && !ItemBlockedGlobally(kind, id)) allowed++;
         return new PackState(ids.Count, allowed, blocked);
     }
 
@@ -1175,33 +1235,50 @@ public static class CardGuardPanel
     // last block keeps that path unreachable, and needs no per-content minimums (30 for Sealed
     // Deck, 8 for Gorge, …) because those are handled by clamping.
 
-    /// <summary>Distinct cards that can still appear for the selected character, across every card
-    /// pack. By id, since a mod card injected into a base pool is listed under both packs.</summary>
-    private static int AllowedCardTotal()
+    /// <summary>
+    /// Whether every character the edit can affect still has at least one card it can be offered.
+    /// Editing one character only has to hold for that character; editing the all-characters scope
+    /// has to hold for ALL of them, since one global block can empty a class whose own pool is
+    /// already thinned. Fails permissive: a scan error must never read as "you may not block this".
+    /// </summary>
+    private static bool EveryAffectedCharacterKeepsACard()
     {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
+            if (!IsAllScope) return AnyCardAllowedFor(_selected);
             foreach (var ci in CardGuardService.GetAllCharacters())
-                CollectAllowed(Drill.CharacterCards, ci.Title, seen);
-            foreach (var kv in CardGuardService.GetModCardPacks())
-                if (!CardGuardService.IsCharacterMod(kv.Key))
-                    CollectAllowed(Drill.ModCards, kv.Key, seen);
+                if (!AnyCardAllowedFor(ci.Title)) return false;
+            return true;
         }
         catch (Exception ex)
         {
-            // Never let a scan failure turn into "you may not block this" — fail permissive.
-            MainFile.Logger.Warn($"[{MainFile.ModId}] allowed-card tally failed: {ex.Message}");
-            return int.MaxValue;
+            MainFile.Logger.Warn($"[{MainFile.ModId}] allowed-card scan failed: {ex.Message}");
+            return true;
         }
-        return seen.Count;
     }
 
-    private static void CollectAllowed(Drill kind, string key, HashSet<string> into)
+    /// <summary>Whether one card anywhere can still be offered to <paramref name="title"/>, under
+    /// that character's own block-set AND the all-characters one. Stops at the first hit — this runs
+    /// on every checkbox click, and a full tally would walk every pool of every character.</summary>
+    private static bool AnyCardAllowedFor(string title)
     {
-        if (PackBlocked(kind, key)) return;
-        foreach (var id in PackItemIds(kind, key))
-            if (ItemAllowed(kind, id)) into.Add(id);
+        foreach (var ci in CardGuardService.GetAllCharacters())
+        {
+            // Mirrors CardGuardService.IsAllowed: your own pool is never gated by a pack flag, so a
+            // pack block on it only takes effect through the individual blocks it drives.
+            bool own = string.Equals(ci.Title, title, StringComparison.OrdinalIgnoreCase);
+            if (!own && !CardGuardService.GetCrossAllowedEffective(title, ci.Title)) continue;
+            foreach (var id in PackItemIds(Drill.CharacterCards, ci.Title))
+                if (CardGuardService.GetCardAllowedEffective(title, id)) return true;
+        }
+        foreach (var kv in CardGuardService.GetModCardPacks())
+        {
+            if (CardGuardService.IsCharacterMod(kv.Key)) continue;
+            if (!CardGuardService.GetModAllowedEffective(title, kv.Key)) continue;
+            foreach (var id in PackItemIds(Drill.ModCards, kv.Key))
+                if (CardGuardService.GetCardAllowedEffective(title, id)) return true;
+        }
+        return false;
     }
 
     /// <summary>Everything one pack's toggles can change, so a refused edit can be put back exactly
@@ -1221,7 +1298,7 @@ public static class CardGuardPanel
     private static bool KeepIfAnyCardRemains(PackSnapshot before)
     {
         if (before.Kind == Drill.ModRelics) return true;
-        if (AllowedCardTotal() > 0) return true;
+        if (EveryAffectedCharacterKeepsACard()) return true;
 
         foreach (var (id, allowed) in before.Items) SetItemAllowed(before.Kind, id, allowed);
         SetPackBlocked(before.Kind, before.Key, before.Blocked);
@@ -1240,6 +1317,8 @@ public static class CardGuardPanel
     /// </summary>
     private static CheckBox MakePackCheck(string label, Drill kind, string key, PackState s)
     {
+        bool lockedByAll = PackBlockedGlobally(kind, key);
+        if (lockedByAll) label += Loc.T("all_mark");
         bool on = s.Total == 0 ? !s.Blocked : s.Allowed > 0;
         var cb = MakeCheck(label + CountsSuffix(s), on, v =>
         {
@@ -1249,6 +1328,7 @@ public static class CardGuardPanel
             // Deferred: this fires from the checkbox's own Toggled signal, and the rebuild frees it.
             Callable.From(RebuildRight).CallDeferred();
         });
+        if (lockedByAll) cb.Disabled = true;
         if (s.Partial)
         {
             cb.AddThemeIconOverride("checked", PartialIcon(cb));
@@ -1290,6 +1370,7 @@ public static class CardGuardPanel
 
     private static string Display(string title)
     {
+        if (string.Equals(title, CardGuardService.AllScope, StringComparison.Ordinal)) return Loc.T("all_chars");
         foreach (var c in CardGuardService.GetAllCharacters())
             if (string.Equals(c.Title, title, StringComparison.OrdinalIgnoreCase)) return c.Display;
         return title;

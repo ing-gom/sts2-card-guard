@@ -27,6 +27,21 @@ internal static class CardGuardService
     /// <summary>The five base-character pool titles — fallback + config default seeding.</summary>
     public static readonly string[] CharacterTitles = { "ironclad", "silent", "defect", "regent", "necrobinder" };
 
+    /// <summary>
+    /// Reserved block-set key for the "every character" scope: a block stored under it applies no
+    /// matter who you play. Every store below is keyed by card-pool title, so the all-characters
+    /// scope rides the SAME dictionaries (and therefore the same save file, the same co-op wire
+    /// format and the same panel plumbing) under a key that cannot be a real pool title — pool
+    /// titles are code identifiers (<c>ironclad</c>, <c>colorless</c>, …). A mod that somehow used
+    /// this as its pool title is dropped from the character list with a warning
+    /// (see <see cref="GetAllCharacters"/>) rather than silently sharing the scope.
+    ///
+    /// Read it through the <c>…Effective</c> helpers, never with a bare <see cref="GetCardAllowed"/>:
+    /// the plain getters are exact-key lookups, which is what the settings panel needs to show and
+    /// edit ONE scope at a time.
+    /// </summary>
+    public const string AllScope = "*";
+
     /// <summary>Per-character BLOCKED other-character titles. Empty by default = all allowed.</summary>
     private static readonly Dictionary<string, HashSet<string>> CrossBlock = new(StringComparer.OrdinalIgnoreCase);
 
@@ -137,6 +152,21 @@ internal static class CardGuardService
             if (allowed) s.Remove(cardId); else s.Add(cardId);
         }
     }
+
+    // ---- Effective (character + all-characters) lookups — what the FILTER asks ----
+    //
+    // A block holds when it is set for the character being played OR for the all-characters scope.
+    // Everything in Patches/ goes through these; the exact-key getters above stay for the panel,
+    // which edits one scope at a time and must not see the other scope's entries as its own.
+
+    public static bool GetCrossAllowedEffective(string fromTitle, string toTitle) =>
+        GetCrossAllowed(fromTitle, toTitle) && GetCrossAllowed(AllScope, toTitle);
+
+    public static bool GetModAllowedEffective(string characterTitle, string modName) =>
+        GetModAllowed(characterTitle, modName) && GetModAllowed(AllScope, modName);
+
+    public static bool GetCardAllowedEffective(string characterTitle, string cardId) =>
+        GetCardAllowed(characterTitle, cardId) && GetCardAllowed(AllScope, cardId);
 
     // ---- Snapshots for persistence (what has been blocked) ----
 
@@ -266,6 +296,13 @@ internal static class CardGuardService
                 string title = pool.Title ?? string.Empty;
                 if (string.IsNullOrEmpty(title) || title.Equals("mock", StringComparison.OrdinalIgnoreCase)
                     || title.Equals("test", StringComparison.OrdinalIgnoreCase)) continue;
+                if (title.Equals(AllScope, StringComparison.Ordinal))
+                {
+                    // Would share the all-characters block-set. No real pool title looks like this;
+                    // listing it anyway would make two rows edit one another's settings.
+                    Log.Warn($"character pool title '{AllScope}' collides with the all-characters scope key — not listed.");
+                    continue;
+                }
                 if (!seen.Add(title)) continue;
                 int count = 0;
                 try { count = pool.AllCards.Count(); } catch { }
@@ -326,7 +363,7 @@ internal static class CardGuardService
         if (_modCharTitles == null || !_modCharTitles.TryGetValue(modName, out var titles) || titles.Count == 0)
             return false;
         foreach (var t in titles)
-            if (GetCrossAllowed(currentTitle, t)) return false; // some character of this mod still allowed
+            if (GetCrossAllowedEffective(currentTitle, t)) return false; // some character of this mod still allowed
         return true;
     }
 
@@ -547,7 +584,7 @@ internal static class CardGuardService
                 if (pool == null || pool.IsColorless) continue;
                 string t = pool.Title ?? string.Empty;
                 if (t.Equals(currentTitle, StringComparison.OrdinalIgnoreCase)) continue; // own handled below
-                if (!GetCrossAllowed(currentTitle, t)) continue;                          // blocked character
+                if (!GetCrossAllowedEffective(currentTitle, t)) continue;                 // blocked character
                 candidates.Add(pool);
             }
 
@@ -637,7 +674,7 @@ internal static class CardGuardService
         if (pool == null) return false;
         string currentTitle = pool.Title ?? string.Empty;
         if (targetTitle.Equals(currentTitle, StringComparison.OrdinalIgnoreCase)) return false; // own is never blocked
-        return !GetCrossAllowed(currentTitle, targetTitle);
+        return !GetCrossAllowedEffective(currentTitle, targetTitle);
     }
 
     /// <summary>Whether <paramref name="card"/> would pass the filter for <paramref name="player"/>'s character (no empty-safety). For diagnostics/console.</summary>
@@ -662,11 +699,11 @@ internal static class CardGuardService
         // Individual card block — BASE-GAME cards included (the panel lists every card in a pack).
         // Independent of the pack gates below: either one blocking is enough to drop the card.
         // Checked up front so it also holds for a card whose Pool can't be resolved.
-        if (!GetCardAllowed(currentTitle, CardIdOf(card))) return false;
+        if (!GetCardAllowedEffective(currentTitle, CardIdOf(card))) return false;
 
         CardPoolModel pool;
         try { pool = card.Pool; }
-        catch { return GetModAllowed(currentTitle, GetModName(card)); }
+        catch { return GetModAllowedEffective(currentTitle, GetModName(card)); }
         if (pool == null) return true;
 
         string title = pool.Title ?? string.Empty;
@@ -679,7 +716,7 @@ internal static class CardGuardService
         // UI never blocks them.
         if (!isOwn && !pool.IsColorless)
         {
-            if (!GetCrossAllowed(currentTitle, title)) return false;
+            if (!GetCrossAllowedEffective(currentTitle, title)) return false;
         }
 
         // Mod-pack block applies regardless of own/other, so blocking a mod removes ITS cards
@@ -696,7 +733,7 @@ internal static class CardGuardService
                 // shared cards too. (Never affects your own class — own is never cross-blocked.)
                 if (AreAllModCharactersBlocked(currentTitle, mn)) return false;
             }
-            else if (!GetModAllowed(currentTitle, mn))
+            else if (!GetModAllowedEffective(currentTitle, mn))
             {
                 // Standalone card-pack mod (no character) — gated by its mod-pack checkbox.
                 return false;
