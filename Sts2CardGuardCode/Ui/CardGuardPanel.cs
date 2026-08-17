@@ -38,18 +38,22 @@ public static class CardGuardPanel
     private static VBoxContainer? _leftList;
     private static string _selected = CardGuardService.CharacterTitles[0];
 
-    // Tabs: 0 = card packs, 1 = relic packs. Both are per character and share the left character
-    // column; only the right-hand allow list differs, so the tab just re-renders the right pane.
+    // Tabs: 0 = cards, 1 = relics, 2 = potions, 3 = map events. Every tab is scoped the same way and
+    // shares the left scope column; only the right-hand allow list differs, so switching tab just
+    // re-renders the right pane.
+    private const int TabCards = 0, TabRelics = 1, TabPotions = 2, TabEvents = 3;
+    private static readonly string[] TabKeys = { "tab_cards", "tab_relics", "tab_potions", "tab_events" };
+    private static readonly string[] HintKeys = { "hint", "relic_hint", "potion_hint", "event_hint" };
     private static int _activeTab;
     private static Label? _hint;
-    private static Button? _tabCardsBtn;
-    private static Button? _tabRelicsBtn;
+    private static readonly Button?[] _tabBtns = new Button?[TabKeys.Length];
 
     // ── Detail (per-item) drill-down ────────────────────────
     // The right pane has two modes: the pack list, and — after pressing a pack's Detail button —
-    // that pack's individual cards/relics. Character packs list every card they hold, base-game
-    // included; relic packs stay mod-only (the game has no per-character base relic pool to list).
-    private enum Drill { None, ModCards, CharacterCards, ModRelics }
+    // that pack's individual cards/relics/potions/events. Character packs list every card they hold,
+    // base-game included, as do potion pools and act event lists; relic packs stay mod-only (the game
+    // has no per-character base relic pool to list).
+    private enum Drill { None, ModCards, CharacterCards, ModRelics, PoolPotions, ModPotions, ActEvents, ModEvents }
     private static Drill _drill = Drill.None;
     /// <summary>Mod assembly name (ModCards / ModRelics) or card-pool title (CharacterCards).</summary>
     private static string _drillKey = "";
@@ -64,9 +68,12 @@ public static class CardGuardPanel
     /// them per keystroke would be wasteful — the set only changes when the target does.</summary>
     private static List<DrillItem>? _drillAll;
 
-    /// <summary>One row of a detail list. <paramref name="Sub"/> is the rarity, shown after the name.
-    /// The model is carried so the row can render its relic icon / preview its card art.</summary>
-    private readonly record struct DrillItem(string Id, string Name, string Sub, CardModel? Card, RelicModel? Relic);
+    /// <summary>One row of a detail list. <paramref name="Sub"/> is the rarity (or the act, for an
+    /// event), shown after the name. The model is carried so the row can render its relic/potion icon
+    /// or preview its card art; exactly one of the model fields is ever set.</summary>
+    private readonly record struct DrillItem(
+        string Id, string Name, string Sub,
+        CardModel? Card = null, RelicModel? Relic = null, PotionModel? Potion = null, EventModel? Event = null);
 
     // ── Hover preview (cards) ───────────────────────────────
     /// <summary>Overlay the preview is parented to. Positioned at the intended CENTER of the preview:
@@ -167,16 +174,16 @@ public static class CardGuardPanel
         SwitchTab(_activeTab);
     }
 
-    /// <summary>Activate a tab (0 = cards, 1 = relics) and rebuild both columns for it.</summary>
+    /// <summary>Activate a tab (see the Tab* constants) and rebuild both columns for it.</summary>
     private static void SwitchTab(int tab)
     {
+        if (tab < 0 || tab >= TabKeys.Length) tab = TabCards;
         _activeTab = tab;
         LeaveDrill(); // a drill target belongs to one tab; switching always lands on the pack list
-        bool cards = tab == 0;
 
-        if (_hint != null) _hint.Text = Loc.T(cards ? "hint" : "relic_hint");
-        if (_tabCardsBtn != null) _tabCardsBtn.AddThemeColorOverride("font_color", cards ? GOLD : GRAY);
-        if (_tabRelicsBtn != null) _tabRelicsBtn.AddThemeColorOverride("font_color", cards ? GRAY : GOLD);
+        if (_hint != null) _hint.Text = Loc.T(HintKeys[tab]);
+        for (int i = 0; i < _tabBtns.Length; i++)
+            _tabBtns[i]?.AddThemeColorOverride("font_color", i == tab ? GOLD : GRAY);
 
         RebuildLeft();
         RebuildRight();
@@ -238,6 +245,47 @@ public static class CardGuardPanel
             catch (Exception ex) { MainFile.Logger.Warn($"[{MainFile.ModId}] TestOpen failed: {ex.Message}"); }
         }).CallDeferred();
 
+    /// <summary>solo-verify hook. Like <see cref="TestOpen"/> but for the drill kinds its
+    /// relics-or-cards flag can't express (potion pools, act event lists).</summary>
+    internal static void TestOpenDrill(Node host, int tab, int kind, string key) =>
+        Callable.From(() =>
+        {
+            try
+            {
+                DoAttach(host);
+                if (_root == null || !GodotObject.IsInstanceValid(_root)) return;
+                _root.Visible = true;
+                SwitchTab(tab);
+                // Label it the way a real click would, so a screenshot shows the header the user sees
+                // rather than the internal group key.
+                if (!string.IsNullOrEmpty(key)) EnterDrill(TestKind(kind), key, DrillLabelFor(TestKind(kind), key));
+            }
+            catch (Exception ex) { MainFile.Logger.Warn($"[{MainFile.ModId}] TestOpenDrill failed: {ex.Message}"); }
+        }).CallDeferred();
+
+    /// <summary>The header a real Detail click would show for this pack.</summary>
+    private static string DrillLabelFor(Drill kind, string key)
+    {
+        try
+        {
+            if (kind == Drill.PoolPotions)
+                foreach (var g in PotionGuardService.GetPotionGroups())
+                    if (string.Equals(g.Key, key, StringComparison.OrdinalIgnoreCase))
+                        return g.OwnerTitle.Length == 0 ? Loc.T("potion_shared") : Display(g.OwnerTitle);
+            if (kind == Drill.ActEvents)
+                foreach (var g in EventGuardService.GetEventGroups())
+                    if (string.Equals(g.Key, key, StringComparison.OrdinalIgnoreCase))
+                        return g.Key == EventGuardService.SharedGroupKey ? Loc.T("event_shared")
+                             : g.Display.Length > 0 ? g.Display : g.Key;
+        }
+        catch { }
+        return key;
+    }
+
+    internal static void TestOpenPotionPool(Node host, string key) => TestOpenDrill(host, TabPotions, 4, key);
+
+    internal static void TestOpenEventGroup(Node host, string key) => TestOpenDrill(host, TabEvents, 6, key);
+
     /// <summary>solo-verify hook — hide the panel again after screenshots.</summary>
     internal static void TestClose() => Callable.From(Hide).CallDeferred();
 
@@ -266,11 +314,16 @@ public static class CardGuardPanel
         catch (Exception ex) { MainFile.Logger.Warn($"[{MainFile.ModId}] TestHoverFirstCard failed: {ex}"); }
     }
 
-    // solo-verify hooks for the pack↔item linkage. kind: 1 = character cards, 2 = mod cards, 3 = mod relics.
+    // solo-verify hooks for the pack↔item linkage. kind: 1 = character cards, 2 = mod cards,
+    // 3 = mod relics, 4 = potion pool, 5 = mod potions, 6 = act events, 7 = mod events.
     private static Drill TestKind(int kind) => kind switch
     {
         1 => Drill.CharacterCards,
         2 => Drill.ModCards,
+        4 => Drill.PoolPotions,
+        5 => Drill.ModPotions,
+        6 => Drill.ActEvents,
+        7 => Drill.ModEvents,
         _ => Drill.ModRelics,
     };
 
@@ -292,6 +345,53 @@ public static class CardGuardPanel
         var d = TestKind(kind);
         SetItemAllowed(d, id, allowed);
         ReconcilePack(d, key);
+    }
+
+    /// <summary>
+    /// solo-verify hook — hover the first row of the open detail list whatever kind it is, and report
+    /// what the preview would show. Returns a description string so the test can assert the text and art
+    /// really resolved instead of only screenshotting an empty panel. Synchronous, like
+    /// <see cref="TestHoverFirstCard"/>.
+    /// </summary>
+    internal static string TestHoverFirstRow()
+    {
+        try
+        {
+            if (_drillItems == null || !GodotObject.IsInstanceValid(_drillItems)) return "(no drill list)";
+            var items = VisibleDrillItems();
+            if (items.Count == 0) return "(no rows)";
+            Control? anchor = null;
+            foreach (var ch in _drillItems.GetChildren())
+            {
+                if (ch is CheckBox c) { anchor = c; break; }
+                if (ch is HBoxContainer hb)
+                    foreach (var inner in hb.GetChildren())
+                        if (inner is CheckBox c2) { anchor = c2; break; }
+                if (anchor != null) break;
+            }
+            if (anchor == null) return "(no checkbox anchor)";
+
+            var it = items[0];
+            if (it.Potion != null)
+            {
+                ShowPotionPreview(it.Potion, anchor);
+                return $"potion '{it.Id}' art={PotionArt(it.Potion) != null} desc=\"{Excerpt(PotionDescription(it.Potion))}\"";
+            }
+            if (it.Event != null)
+            {
+                ShowEventPreview(it.Event, anchor);
+                return $"event '{it.Id}' portrait={EventPortrait(it.Event) != null} desc=\"{Excerpt(EventDescription(it.Event))}\"";
+            }
+            if (it.Card != null) { ShowCardPreview(it.Card, anchor); return $"card '{it.Id}'"; }
+            return $"(row '{it.Id}' has no previewable model)";
+        }
+        catch (Exception ex) { return "hover failed: " + ex.Message; }
+    }
+
+    private static string Excerpt(string s)
+    {
+        s = s.Replace("\n", " ").Replace("\r", " ");
+        return s.Length <= 110 ? s : s.Substring(0, 110) + "…";
     }
 
     /// <summary>solo-verify hook — preview an arbitrary card (control case for diagnosing renders).</summary>
@@ -379,13 +479,15 @@ public static class CardGuardPanel
         header.AddChild(x);
         vbox.AddChild(header);
 
-        // Tab bar: Cards | Relics.
+        // Tab bar: Cards | Relics | Potions | Events.
         var tabBar = new HBoxContainer();
         tabBar.AddThemeConstantOverride("separation", 8);
-        _tabCardsBtn = MakeTab(Loc.T("tab_cards"), 0);
-        _tabRelicsBtn = MakeTab(Loc.T("tab_relics"), 1);
-        tabBar.AddChild(_tabCardsBtn);
-        tabBar.AddChild(_tabRelicsBtn);
+        for (int i = 0; i < TabKeys.Length; i++)
+        {
+            var b = MakeTab(Loc.T(TabKeys[i]), i);
+            _tabBtns[i] = b;
+            tabBar.AddChild(b);
+        }
         vbox.AddChild(tabBar);
 
         _hint = new Label
@@ -517,7 +619,9 @@ public static class CardGuardPanel
         DrawNotice();
 
         if (_drill != Drill.None) { RebuildDrill(); return; }
-        if (_activeTab == 1) { RebuildRelicsRight(); return; }
+        if (_activeTab == TabRelics) { RebuildRelicsRight(); return; }
+        if (_activeTab == TabPotions) { RebuildPotionsRight(); return; }
+        if (_activeTab == TabEvents) { RebuildEventsRight(); return; }
 
         _rightList.AddChild(SectionLabel(Loc.T("sec_char")));
 
@@ -605,6 +709,107 @@ public static class CardGuardPanel
             var st = PackStateOf(Drill.ModRelics, m);
             var cb = MakePackCheck($"{m}  —  {kv.Value.Total} " + Loc.T("relics"), Drill.ModRelics, m, st);
             _rightList.AddChild(RowWithDetail(cb, () => EnterDrill(Drill.ModRelics, m, m)));
+        }
+    }
+
+    // ── Potions tab: the pools random generation draws from, for the selected scope ──
+    //
+    // Only the pools that can actually be rolled for this scope are listed: the shared pool, plus the
+    // selected character's own three. Another character's potion pool is never read while you play
+    // this one, so a row for it would be a switch that does nothing — except in the all-characters
+    // scope, where every character's pool is in play.
+    private static void RebuildPotionsRight()
+    {
+        if (_rightList == null) return;
+
+        _rightList.AddChild(SectionLabel(Loc.T("potion_sec")));
+
+        int shown = 0;
+        foreach (var g in PotionGuardService.GetPotionGroups())
+        {
+            bool sharedPool = g.OwnerTitle.Length == 0;
+            if (!sharedPool && !IsAllScope
+                && !string.Equals(g.OwnerTitle, _selected, StringComparison.OrdinalIgnoreCase)) continue;
+
+            string key = g.Key;
+            string disp = sharedPool ? Loc.T("potion_shared") : Display(g.OwnerTitle);
+            var st = PackStateOf(Drill.PoolPotions, key);
+            var cb = MakePackCheck($"{disp}  —  {g.Potions.Count} " + Loc.T("potions"), Drill.PoolPotions, key, st);
+            _rightList.AddChild(RowWithDetail(cb, () => EnterDrill(Drill.PoolPotions, key, disp)));
+            shown++;
+        }
+        if (shown == 0)
+        {
+            var none = new Label { Text = Loc.T("no_potions") };
+            none.AddThemeColorOverride("font_color", GRAY);
+            _rightList.AddChild(none);
+        }
+
+        _rightList.AddChild(SectionLabel(Loc.T("potion_mod_sec")));
+        var mods = PotionGuardService.GetModPotionPacks()
+            .OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (mods.Count == 0)
+        {
+            var none = new Label { Text = Loc.T("no_potion_mods") };
+            none.AddThemeColorOverride("font_color", GRAY);
+            _rightList.AddChild(none);
+            return;
+        }
+        foreach (var kv in mods)
+        {
+            string m = kv.Key;
+            var st = PackStateOf(Drill.ModPotions, m);
+            var cb = MakePackCheck($"{m}  —  {kv.Value.Total} " + Loc.T("potions"), Drill.ModPotions, m, st);
+            _rightList.AddChild(RowWithDetail(cb, () => EnterDrill(Drill.ModPotions, m, m)));
+        }
+    }
+
+    // ── Events tab: the map's event pool, per act plus the shared list ──
+    //
+    // Not scoped per character by the game — both players walk into the same event room — so a block
+    // set for one character holds whenever that character is in the run. Ancient beings are absent:
+    // they are pulled through a path the skip logic never reaches (see EventGuardService).
+    private static void RebuildEventsRight()
+    {
+        if (_rightList == null) return;
+
+        _rightList.AddChild(SectionLabel(Loc.T("event_sec")));
+
+        var groups = EventGuardService.GetEventGroups();
+        if (groups.Count == 0)
+        {
+            var none = new Label { Text = Loc.T("no_events") };
+            none.AddThemeColorOverride("font_color", GRAY);
+            _rightList.AddChild(none);
+        }
+        foreach (var g in groups)
+        {
+            string key = g.Key;
+            string disp = g.Key == EventGuardService.SharedGroupKey ? Loc.T("event_shared")
+                        : g.Display.Length > 0 ? g.Display : g.Key;
+            var st = PackStateOf(Drill.ActEvents, key);
+            var cb = MakePackCheck($"{disp}  —  {g.Events.Count} " + Loc.T("events"), Drill.ActEvents, key, st);
+            _rightList.AddChild(RowWithDetail(cb, () => EnterDrill(Drill.ActEvents, key, disp)));
+        }
+
+        _rightList.AddChild(SectionLabel(Loc.T("event_mod_sec")));
+        var mods = EventGuardService.GetModEventPacks()
+            .OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (mods.Count == 0)
+        {
+            var none = new Label { Text = Loc.T("no_event_mods") };
+            none.AddThemeColorOverride("font_color", GRAY);
+            _rightList.AddChild(none);
+            return;
+        }
+        foreach (var kv in mods)
+        {
+            string m = kv.Key;
+            var st = PackStateOf(Drill.ModEvents, m);
+            var cb = MakePackCheck($"{m}  —  {kv.Value.Total} " + Loc.T("events"), Drill.ModEvents, m, st);
+            _rightList.AddChild(RowWithDetail(cb, () => EnterDrill(Drill.ModEvents, m, m)));
         }
     }
 
@@ -737,7 +942,7 @@ public static class CardGuardPanel
                 var before = Snapshot(_drill, _drillKey);
                 SetDrillAllowed(id, v);
                 ReconcilePack(_drill, _drillKey); // keep the pack flag in step with its items
-                if (!KeepIfAnyCardRemains(before))
+                if (!KeepIfFloorHolds(before))
                 {
                     // The row still shows the click that was refused — redraw it from the restored
                     // state. Deferred: we are inside the checkbox's own Toggled signal.
@@ -746,14 +951,17 @@ public static class CardGuardPanel
                 }
                 CardGuardConfig.Save();
                 UpdateDrillCount();
+                // A notice only draws on a rebuild, and the row toggle doesn't need one otherwise —
+                // so redraw exactly when the edit produced something to say (a full ban).
+                if (_notice.Length > 0) Callable.From(RebuildRight).CallDeferred();
             });
             if (lockedByAll) cb.Disabled = true;
 
             Control row = cb;
-            if (it.Relic != null)
+            if (it.Relic != null || it.Potion != null)
             {
-                // Relics read as icons far more than as names — show it inline on every row.
-                var icon = RelicIcon(it.Relic);
+                // Relics and potions read as icons far more than as names — show it inline on every row.
+                var icon = it.Relic != null ? RelicIcon(it.Relic) : PotionIcon(it.Potion!);
                 if (icon != null)
                 {
                     var hb = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
@@ -773,6 +981,21 @@ public static class CardGuardPanel
                 cb.MouseExited += ClearPreview;
             }
 
+            // A name alone doesn't say what an event or potion does — hovering shows the game's own
+            // description (and art) so you can tell what you are about to block.
+            if (it.Potion != null)
+            {
+                var potion = it.Potion;
+                cb.MouseEntered += () => ShowPotionPreview(potion, cb);
+                cb.MouseExited += ClearPreview;
+            }
+            else if (it.Event != null)
+            {
+                var ev = it.Event;
+                cb.MouseEntered += () => ShowEventPreview(ev, cb);
+                cb.MouseExited += ClearPreview;
+            }
+
             _drillItems.AddChild(row);
         }
     }
@@ -786,7 +1009,7 @@ public static class CardGuardPanel
         foreach (var it in VisibleDrillItems())
             if (!ItemBlockedGlobally(_drill, it.Id)) SetDrillAllowed(it.Id, allowed);
         ReconcilePack(_drill, _drillKey);
-        if (KeepIfAnyCardRemains(before)) CardGuardConfig.Save();
+        if (KeepIfFloorHolds(before)) CardGuardConfig.Save();
         // Whole-pane redraw, because the notice sits above the list rather than inside it — and
         // deferred, since this runs from the Allow all / Block all button's own Pressed signal and
         // the rebuild frees that button.
@@ -835,6 +1058,24 @@ public static class CardGuardPanel
                     foreach (var c in CardGuardService.GetPoolAllCards(_drillKey))
                         list.Add(new DrillItem(CardGuardService.CardIdOf(c), CardName(c), RarityOf(c), c, null));
                     break;
+                case Drill.PoolPotions:
+                    foreach (var p in PotionsOfGroup(_drillKey))
+                        list.Add(new DrillItem(PotionGuardService.PotionIdOf(p), PotionName(p), RarityOf(p), Potion: p));
+                    break;
+                case Drill.ModPotions:
+                    if (PotionGuardService.GetModPotionPacks().TryGetValue(_drillKey, out var pp))
+                        foreach (var p in pp.Potions)
+                            list.Add(new DrillItem(PotionGuardService.PotionIdOf(p), PotionName(p), RarityOf(p), Potion: p));
+                    break;
+                case Drill.ActEvents:
+                    foreach (var e in EventsOfGroup(_drillKey))
+                        list.Add(new DrillItem(EventGuardService.EventIdOf(e), EventName(e), string.Empty, Event: e));
+                    break;
+                case Drill.ModEvents:
+                    if (EventGuardService.GetModEventPacks().TryGetValue(_drillKey, out var ep))
+                        foreach (var e in ep.Events)
+                            list.Add(new DrillItem(EventGuardService.EventIdOf(e), EventName(e), string.Empty, Event: e));
+                    break;
             }
         }
         catch (Exception ex)
@@ -847,28 +1088,40 @@ public static class CardGuardPanel
         return list;
     }
 
+    /// <summary>Potions of one pool group, by the group key a pack row carries.</summary>
+    private static IEnumerable<PotionModel> PotionsOfGroup(string key)
+    {
+        foreach (var g in PotionGuardService.GetPotionGroups())
+            if (string.Equals(g.Key, key, StringComparison.OrdinalIgnoreCase)) return g.Potions;
+        return Array.Empty<PotionModel>();
+    }
+
+    /// <summary>Events of one act (or the shared list), by the group key a pack row carries.</summary>
+    private static IEnumerable<EventModel> EventsOfGroup(string key)
+    {
+        foreach (var g in EventGuardService.GetEventGroups())
+            if (string.Equals(g.Key, key, StringComparison.OrdinalIgnoreCase)) return g.Events;
+        return Array.Empty<EventModel>();
+    }
+
     /// <summary>Whether the drilled item can still appear for the selected scope — its own setting
     /// AND the all-characters one, so the header count matches what the rows show.</summary>
     private static bool DrillAllowed(string id) =>
-        !ItemBlockedGlobally(_drill, id)
-        && (_drill == Drill.ModRelics
-            ? RelicGuardService.GetRelicAllowed(_selected, id)
-            : CardGuardService.GetCardAllowed(_selected, id));
+        !ItemBlockedGlobally(_drill, id) && ItemAllowed(_drill, id);
 
-    private static void SetDrillAllowed(string id, bool allowed)
-    {
-        if (_drill == Drill.ModRelics) RelicGuardService.SetRelicAllowed(_selected, id, allowed);
-        else CardGuardService.SetCardAllowed(_selected, id, allowed);
-    }
+    private static void SetDrillAllowed(string id, bool allowed) => SetItemAllowed(_drill, id, allowed);
 
     /// <summary>Whether the pack being drilled into is itself still allowed for this scope.</summary>
     private static bool PackCurrentlyAllowed() => !PackBlockedGlobally(_drill, _drillKey) && _drill switch
     {
         Drill.ModRelics => RelicGuardService.GetModAllowed(_selected, _drillKey),
         Drill.ModCards => CardGuardService.GetModAllowed(_selected, _drillKey),
+        Drill.ModPotions => PotionGuardService.GetModAllowed(_selected, _drillKey),
+        Drill.ModEvents => EventGuardService.GetModAllowed(_selected, _drillKey),
         // Your own pack is never cross-blocked; another character's is.
         Drill.CharacterCards => IsOwnPack(Drill.CharacterCards, _drillKey)
                                 || CardGuardService.GetCrossAllowed(_selected, _drillKey),
+        // Potion pools and act event lists carry no pack flag of their own (see HasPackFlag).
         _ => true,
     };
 
@@ -877,27 +1130,39 @@ public static class CardGuardPanel
     /// <summary>Small inline icon for a relic row, or null if the texture won't load.</summary>
     private static TextureRect? RelicIcon(RelicModel relic)
     {
-        try
-        {
-            var tex = relic.Icon;
-            if (tex == null) return null;
-            // ★ExpandMode must be assigned BEFORE any size: setting Size first clamps the rect to the
-            // texture's native size and the icon overflows the row (the Sts2SlotMachine lesson).
-            var tr = new TextureRect
-            {
-                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
-                StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
-                MouseFilter = Control.MouseFilterEnum.Ignore,
-                Texture = tex,
-            };
-            tr.CustomMinimumSize = new Vector2(30, 30);
-            return tr;
-        }
+        try { return IconRect(relic.Icon); }
         catch (Exception ex)
         {
             MainFile.Logger.Warn($"[{MainFile.ModId}] relic icon load failed ({relic?.Id.Entry}): {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>Small inline icon for a potion row, or null if the texture won't load.</summary>
+    private static TextureRect? PotionIcon(PotionModel potion)
+    {
+        try { return IconRect(potion.Image); }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[{MainFile.ModId}] potion icon load failed ({potion?.Id.Entry}): {ex.Message}");
+            return null;
+        }
+    }
+
+    private static TextureRect? IconRect(Texture2D? tex)
+    {
+        if (tex == null) return null;
+        // ★ExpandMode must be assigned BEFORE any size: setting Size first clamps the rect to the
+        // texture's native size and the icon overflows the row (the Sts2SlotMachine lesson).
+        var tr = new TextureRect
+        {
+            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+            StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+            Texture = tex,
+        };
+        tr.CustomMinimumSize = new Vector2(30, 30);
+        return tr;
     }
 
     /// <summary>
@@ -962,6 +1227,240 @@ public static class CardGuardPanel
     }
 
     private const float PreviewScale = 0.8f;
+
+    // ── Info preview (events / potions) ─────────────────────
+    //
+    // A card row can be identified from its art, so it borrows a real NCard. An event or potion row is
+    // just a name, and a name does not say what the thing DOES — so those rows show the game's own text
+    // instead: the event's opening paragraph, the potion's description, with the art beside it.
+    //
+    // ★The text is BBCode. The game renders event descriptions through `MegaRichTextLabel`
+    // (`Layout.SetDescription(description.GetFormattedText())`), which installs 13 custom effects for
+    // tags like [gold] and [jitter]. A plain Label would print those tags literally, so we borrow the
+    // same widget and fall back to a stock RichTextLabel only if it cannot be constructed.
+    private const float InfoPreviewWidth = 460f;
+
+    /// <summary>Show <paramref name="body"/> (BBCode) under <paramref name="title"/>, with optional art,
+    /// beside the hovered row. No-ops when there is nothing to add beyond the row's own label.</summary>
+    private static void ShowInfoPreview(string title, string body, Texture2D? art, Vector2 artSize, Control anchor)
+    {
+        ClearPreview();
+        if (_previewHost == null || !GodotObject.IsInstanceValid(_previewHost)) return;
+        if (_root == null || !_root.Visible) return;
+        if (body.Length == 0 && art == null) return;
+
+        try
+        {
+            var panel = new PanelContainer { MouseFilter = Control.MouseFilterEnum.Ignore };
+            var sb = new StyleBoxFlat { BgColor = new Color(0.055f, 0.065f, 0.098f, 0.98f) };
+            sb.SetBorderWidthAll(2);
+            sb.BorderColor = new Color(0.42f, 0.38f, 0.26f, 1.0f);
+            sb.SetCornerRadiusAll(8);
+            panel.AddThemeStyleboxOverride("panel", sb);
+
+            var margin = new MarginContainer();
+            foreach (var side in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
+                margin.AddThemeConstantOverride(side, 14);
+            panel.AddChild(margin);
+
+            var col = new VBoxContainer();
+            col.AddThemeConstantOverride("separation", 10);
+            margin.AddChild(col);
+
+            float textWidth = InfoPreviewWidth - 28f;
+
+            if (title.Length > 0)
+            {
+                var head = new Label { Text = title, AutowrapMode = TextServer.AutowrapMode.WordSmart };
+                head.AddThemeFontSizeOverride("font_size", 18);
+                head.AddThemeColorOverride("font_color", GOLD);
+                head.CustomMinimumSize = new Vector2(textWidth, 0);
+                col.AddChild(head);
+            }
+
+            if (art != null)
+            {
+                var pic = new TextureRect
+                {
+                    ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                    StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                    MouseFilter = Control.MouseFilterEnum.Ignore,
+                    Texture = art,
+                };
+                pic.CustomMinimumSize = artSize;
+                col.AddChild(pic);
+            }
+
+            if (body.Length > 0) col.AddChild(MakeBodyLabel(body, textWidth));
+
+            _previewHost.AddChild(panel);
+
+            // Positioned twice on purpose: the host sits at the preview's intended CENTRE (see
+            // PreviewCenter), and a PanelContainer's real height is only known after Godot lays it out —
+            // so place it with an estimate now and correct on the next idle frame.
+            var estimate = new Vector2(InfoPreviewWidth, EstimateInfoHeight(title, body, art, artSize));
+            PlaceInfoPreview(panel, anchor, estimate);
+            _previewHost.Visible = true;
+            Callable.From(() =>
+            {
+                if (!GodotObject.IsInstanceValid(panel) || panel.GetParent() != _previewHost) return;
+                var real = panel.Size;
+                if (real.X > 1f && real.Y > 1f) PlaceInfoPreview(panel, anchor, real);
+            }).CallDeferred();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[{MainFile.ModId}] info preview failed: {ex.Message}");
+            ClearPreview();
+        }
+    }
+
+    private static void PlaceInfoPreview(Control panel, Control anchor, Vector2 size)
+    {
+        if (_previewHost == null || !GodotObject.IsInstanceValid(_previewHost)) return;
+        panel.Position = -size * 0.5f;
+        _previewHost.Position = PreviewCenter(anchor, size);
+    }
+
+    /// <summary>Rough height before layout, only good enough to place the panel for one frame.</summary>
+    private static float EstimateInfoHeight(string title, string body, Texture2D? art, Vector2 artSize)
+    {
+        float h = 28f;                                   // margins
+        if (title.Length > 0) h += 26f;
+        if (art != null) h += artSize.Y + 10f;
+        if (body.Length > 0) h += Mathf.Ceil(body.Length / 44f) * 22f + 10f;
+        return Mathf.Clamp(h, 80f, 720f);
+    }
+
+    /// <summary>The game's own BBCode label, so [gold]/[jitter]-style tags render instead of printing.
+    /// Falls back to a stock RichTextLabel — still BBCode, just without the custom effects.</summary>
+    private static Control MakeBodyLabel(string text, float width)
+    {
+        RichTextLabel? label = null;
+        try
+        {
+            label = new MegaCrit.Sts2.addons.mega_text.MegaRichTextLabel();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[{MainFile.ModId}] MegaRichTextLabel unavailable ({ex.Message}); using a stock RichTextLabel.");
+        }
+        label ??= new RichTextLabel();
+
+        label.BbcodeEnabled = true;
+        label.FitContent = true;
+        label.ScrollActive = false;
+        label.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        label.MouseFilter = Control.MouseFilterEnum.Ignore;
+        label.CustomMinimumSize = new Vector2(width, 0);
+        label.AddThemeFontSizeOverride("normal_font_size", 16);
+        label.AddThemeFontSizeOverride("bold_font_size", 16);
+
+        // ★A font OVERRIDE must exist before the node enters the tree. MegaRichTextLabel._Ready starts
+        // with AssertThemeFontOverride("normal_font") and THROWS without one ("Please set one to avoid a
+        // Godot engine bug") — which aborts _Ready before it installs the custom BBCode effects, so tags
+        // like [gold] end up printed as literal text instead of colouring the word. Measured exactly
+        // that: "[gold]방어도[/gold]를 3배로 만듭니다." on screen.
+        EnsureRichTextFonts(label);
+
+        // ★MegaRichTextLabel auto-sizes its font to whatever rect it currently has, from _Ready and
+        // again on every resize — and its floor is 8px. In a panel that has not been laid out yet that
+        // means it shrinks to unreadable and stays there (measured: the description rendered at a
+        // fraction of the title's size). Turn it off so the size set above is the size shown.
+        if (label is MegaCrit.Sts2.addons.mega_text.MegaRichTextLabel mega)
+        {
+            try { mega.AutoSizeEnabled = false; }
+            catch (Exception ex) { MainFile.Logger.Warn($"[{MainFile.ModId}] could not disable rich-text auto-size: {ex.Message}"); }
+        }
+
+        label.Text = text;
+        return label;
+    }
+
+    /// <summary>Copy the project theme's RichTextLabel fonts onto <paramref name="label"/> as overrides.
+    /// Read from a control already in the tree, since theme lookup walks the tree; the Mega label then
+    /// swaps in the locale-appropriate face itself (<c>RefreshFont</c>), which is what keeps Korean and
+    /// Chinese glyphs rendering.</summary>
+    private static void EnsureRichTextFonts(RichTextLabel label)
+    {
+        try
+        {
+            Control? src = _previewHost ?? _root;
+            Font? normal = null;
+            try { normal = src?.GetThemeFont("normal_font", "RichTextLabel"); } catch { }
+            try { normal ??= ThemeDB.Singleton?.FallbackFont; } catch { }
+            if (normal == null) return; // no font to hand over — the Mega label will refuse and we fall back
+
+            label.AddThemeFontOverride("normal_font", normal);
+            Font? bold = null, italics = null;
+            try { bold = src?.GetThemeFont("bold_font", "RichTextLabel"); } catch { }
+            try { italics = src?.GetThemeFont("italics_font", "RichTextLabel"); } catch { }
+            label.AddThemeFontOverride("bold_font", bold ?? normal);
+            label.AddThemeFontOverride("italics_font", italics ?? normal);
+        }
+        catch (Exception ex) { MainFile.Logger.Warn($"[{MainFile.ModId}] rich-text font override failed: {ex.Message}"); }
+    }
+
+    private static void ShowEventPreview(EventModel ev, Control anchor) =>
+        ShowInfoPreview(EventName(ev), EventDescription(ev), EventPortrait(ev), new Vector2(240, 150), anchor);
+
+    private static void ShowPotionPreview(PotionModel potion, Control anchor) =>
+        ShowInfoPreview(PotionName(potion), PotionDescription(potion), PotionArt(potion), new Vector2(72, 72), anchor);
+
+    /// <summary>The event's opening paragraph — the same LocString the event screen shows
+    /// (<c>SetInitialEventState</c> hands <c>InitialDescription</c> straight to the layout), and it
+    /// carries no dynamic vars, so it resolves on a canonical event with no owner.</summary>
+    private static string EventDescription(EventModel ev)
+    {
+        try
+        {
+            var s = ev.InitialDescription?.GetFormattedText();
+            return string.IsNullOrWhiteSpace(s) ? string.Empty : s!.Trim();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[{MainFile.ModId}] event description failed ({ev?.Id.Entry}): {ex.Message}");
+            return string.Empty;
+        }
+    }
+
+    private static Texture2D? EventPortrait(EventModel ev)
+    {
+        try
+        {
+            // Checked before loading: not every event ships a portrait, and the cache would rather not
+            // be asked for a path that isn't there.
+            if (!ResourceLoader.Exists(ev.InitialPortraitPath)) return null;
+            return ev.CreateInitialPortrait();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[{MainFile.ModId}] event portrait failed ({ev?.Id.Entry}): {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>The potion's own description, vars filled in. <c>DynamicDescription</c> builds its var
+    /// set from the model itself rather than a player, so it resolves outside a run.</summary>
+    private static string PotionDescription(PotionModel potion)
+    {
+        try
+        {
+            var s = potion.DynamicDescription?.GetFormattedText();
+            return string.IsNullOrWhiteSpace(s) ? string.Empty : s!.Trim();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[{MainFile.ModId}] potion description failed ({potion?.Id.Entry}): {ex.Message}");
+            return string.Empty;
+        }
+    }
+
+    private static Texture2D? PotionArt(PotionModel potion)
+    {
+        try { return potion.Image; }
+        catch { return null; }
+    }
 
     private static Vector2 SafeCardSize(NCard node)
     {
@@ -1064,6 +1563,23 @@ public static class CardGuardPanel
         try { return relic.Rarity.ToString(); } catch { return string.Empty; }
     }
 
+    private static string PotionName(PotionModel potion)
+    {
+        try { var s = potion.Title?.GetFormattedText(); if (!string.IsNullOrWhiteSpace(s)) return s!; } catch { }
+        try { return potion.Id.Entry ?? string.Empty; } catch { return string.Empty; }
+    }
+
+    private static string RarityOf(PotionModel potion)
+    {
+        try { return potion.Rarity.ToString(); } catch { return string.Empty; }
+    }
+
+    private static string EventName(EventModel ev)
+    {
+        try { var s = ev.Title?.GetFormattedText(); if (!string.IsNullOrWhiteSpace(s)) return s!; } catch { }
+        try { return ev.Id.Entry ?? string.Empty; } catch { return string.Empty; }
+    }
+
     /// <summary>Whether a relic is worth offering as a toggle. Starter relics are excluded: a
     /// character's starting relics are written straight onto the player (<c>StartingRelics</c> →
     /// <c>player.Relics</c>) and never pass through the grab bag or <c>RelicCmd.Obtain</c>, so the
@@ -1107,6 +1623,20 @@ public static class CardGuardPanel
                 case Drill.CharacterCards:
                     foreach (var c in CardGuardService.GetPoolAllCards(key)) ids.Add(CardGuardService.CardIdOf(c));
                     break;
+                case Drill.PoolPotions:
+                    foreach (var p in PotionsOfGroup(key)) ids.Add(PotionGuardService.PotionIdOf(p));
+                    break;
+                case Drill.ModPotions:
+                    if (PotionGuardService.GetModPotionPacks().TryGetValue(key, out var pp))
+                        foreach (var p in pp.Potions) ids.Add(PotionGuardService.PotionIdOf(p));
+                    break;
+                case Drill.ActEvents:
+                    foreach (var e in EventsOfGroup(key)) ids.Add(EventGuardService.EventIdOf(e));
+                    break;
+                case Drill.ModEvents:
+                    if (EventGuardService.GetModEventPacks().TryGetValue(key, out var ep))
+                        foreach (var e in ep.Events) ids.Add(EventGuardService.EventIdOf(e));
+                    break;
             }
         }
         catch (Exception ex) { MainFile.Logger.Warn($"[{MainFile.ModId}] pack item scan failed ({key}): {ex.Message}"); }
@@ -1131,14 +1661,33 @@ public static class CardGuardPanel
     // character is selected — otherwise the row would show "allowed" for a card that can never
     // appear, and un-ticking it would write a per-character block that changes nothing.
 
+    /// <summary>
+    /// Whether a pack row owns a block flag of its own, separate from its items.
+    ///
+    /// Your own character's card pack never had one (it always applies). Potion pools and act event
+    /// lists don't either: unlike a mod pack — whose flag also gates content the detail list cannot
+    /// enumerate, such as a character mod's shared curses or its Ancient being — a pool row lists
+    /// literally everything in it, so its own items ARE the whole setting. Without this the pack
+    /// checkbox would need a flag to write to and the "pool title" key would collide with the
+    /// character-scope keys in the card block-set.
+    /// </summary>
+    private static bool HasPackFlag(Drill kind, string key) => kind switch
+    {
+        Drill.CharacterCards => !IsOwnPack(kind, key),
+        Drill.PoolPotions or Drill.ActEvents => false,
+        _ => true,
+    };
+
     /// <summary>Whether this pack is blocked by the all-characters scope while a character is selected.</summary>
     private static bool PackBlockedGlobally(Drill kind, string key)
     {
-        if (IsAllScope) return false;
+        if (IsAllScope || !HasPackFlag(kind, key)) return false;
         return kind switch
         {
             Drill.ModRelics => !RelicGuardService.GetModAllowed(CardGuardService.AllScope, key),
             Drill.ModCards => !CardGuardService.GetModAllowed(CardGuardService.AllScope, key),
+            Drill.ModPotions => !PotionGuardService.GetModAllowed(CardGuardService.AllScope, key),
+            Drill.ModEvents => !EventGuardService.GetModAllowed(CardGuardService.AllScope, key),
             Drill.CharacterCards => !CardGuardService.GetCrossAllowed(CardGuardService.AllScope, key),
             _ => false,
         };
@@ -1148,38 +1697,59 @@ public static class CardGuardPanel
     private static bool ItemBlockedGlobally(Drill kind, string id)
     {
         if (IsAllScope) return false;
-        return kind == Drill.ModRelics
-            ? !RelicGuardService.GetRelicAllowed(CardGuardService.AllScope, id)
-            : !CardGuardService.GetCardAllowed(CardGuardService.AllScope, id);
+        return !ItemAllowedIn(kind, CardGuardService.AllScope, id);
     }
 
-    private static bool PackBlocked(Drill kind, string key) => kind switch
+    private static bool PackBlocked(Drill kind, string key)
     {
-        Drill.ModRelics => !RelicGuardService.GetModAllowed(_selected, key),
-        Drill.ModCards => !CardGuardService.GetModAllowed(_selected, key),
-        Drill.CharacterCards => !IsOwnPack(kind, key) && !CardGuardService.GetCrossAllowed(_selected, key),
-        _ => false,
-    };
+        if (!HasPackFlag(kind, key)) return false;
+        return kind switch
+        {
+            Drill.ModRelics => !RelicGuardService.GetModAllowed(_selected, key),
+            Drill.ModCards => !CardGuardService.GetModAllowed(_selected, key),
+            Drill.ModPotions => !PotionGuardService.GetModAllowed(_selected, key),
+            Drill.ModEvents => !EventGuardService.GetModAllowed(_selected, key),
+            Drill.CharacterCards => !CardGuardService.GetCrossAllowed(_selected, key),
+            _ => false,
+        };
+    }
 
     private static void SetPackBlocked(Drill kind, string key, bool blocked)
     {
-        if (IsOwnPack(kind, key)) return;
+        if (!HasPackFlag(kind, key)) return;
         switch (kind)
         {
             case Drill.ModRelics: RelicGuardService.SetModAllowed(_selected, key, !blocked); break;
             case Drill.ModCards: CardGuardService.SetModAllowed(_selected, key, !blocked); break;
+            case Drill.ModPotions: PotionGuardService.SetModAllowed(_selected, key, !blocked); break;
+            case Drill.ModEvents: EventGuardService.SetModAllowed(_selected, key, !blocked); break;
             case Drill.CharacterCards: CardGuardService.SetCrossAllowed(_selected, key, !blocked); break;
         }
     }
 
-    private static bool ItemAllowed(Drill kind, string id) => kind == Drill.ModRelics
-        ? RelicGuardService.GetRelicAllowed(_selected, id)
-        : CardGuardService.GetCardAllowed(_selected, id);
+    private static bool ItemAllowed(Drill kind, string id) => ItemAllowedIn(kind, _selected, id);
+
+    /// <summary>Exact-scope item lookup, so the same dispatch serves both the selected scope and the
+    /// all-characters one.</summary>
+    private static bool ItemAllowedIn(Drill kind, string scope, string id) => kind switch
+    {
+        Drill.ModRelics => RelicGuardService.GetRelicAllowed(scope, id),
+        Drill.PoolPotions or Drill.ModPotions => PotionGuardService.GetPotionAllowed(scope, id),
+        Drill.ActEvents or Drill.ModEvents => EventGuardService.GetEventAllowed(scope, id),
+        _ => CardGuardService.GetCardAllowed(scope, id),
+    };
 
     private static void SetItemAllowed(Drill kind, string id, bool allowed)
     {
-        if (kind == Drill.ModRelics) RelicGuardService.SetRelicAllowed(_selected, id, allowed);
-        else CardGuardService.SetCardAllowed(_selected, id, allowed);
+        switch (kind)
+        {
+            case Drill.ModRelics: RelicGuardService.SetRelicAllowed(_selected, id, allowed); break;
+            case Drill.PoolPotions:
+            case Drill.ModPotions: PotionGuardService.SetPotionAllowed(_selected, id, allowed); break;
+            case Drill.ActEvents:
+            case Drill.ModEvents: EventGuardService.SetEventAllowed(_selected, id, allowed); break;
+            default: CardGuardService.SetCardAllowed(_selected, id, allowed); break;
+        }
     }
 
     /// <summary><paramref name="Allowed"/> counts only what can actually appear, so a blocked pack
@@ -1211,7 +1781,7 @@ public static class CardGuardPanel
     /// <summary>Item toggled: restore the invariant by re-deriving the pack flag from its items.</summary>
     private static void ReconcilePack(Drill kind, string key)
     {
-        if (IsOwnPack(kind, key)) return;
+        if (!HasPackFlag(kind, key)) return;
         var ids = PackItemIds(kind, key);
         if (ids.Count == 0) return; // nothing enumerable — the flag stands alone
 
@@ -1241,18 +1811,18 @@ public static class CardGuardPanel
     /// has to hold for ALL of them, since one global block can empty a class whose own pool is
     /// already thinned. Fails permissive: a scan error must never read as "you may not block this".
     /// </summary>
-    private static bool EveryAffectedCharacterKeepsACard()
+    private static bool EveryAffectedCharacterKeeps(Func<string, bool> anyAllowedFor)
     {
         try
         {
-            if (!IsAllScope) return AnyCardAllowedFor(_selected);
+            if (!IsAllScope) return anyAllowedFor(_selected);
             foreach (var ci in CardGuardService.GetAllCharacters())
-                if (!AnyCardAllowedFor(ci.Title)) return false;
+                if (!anyAllowedFor(ci.Title)) return false;
             return true;
         }
         catch (Exception ex)
         {
-            MainFile.Logger.Warn($"[{MainFile.ModId}] allowed-card scan failed: {ex.Message}");
+            MainFile.Logger.Warn($"[{MainFile.ModId}] floor scan failed: {ex.Message}");
             return true;
         }
     }
@@ -1292,19 +1862,57 @@ public static class CardGuardPanel
         return new PackSnapshot(kind, key, PackBlocked(kind, key), items);
     }
 
-    /// <summary>Keeps the edit if any card survives it; otherwise puts <paramref name="before"/> back
-    /// and raises the notice. Relic edits are never refused — relics can't empty the card pool, and
-    /// an empty relic bag already resolves to the game's own fallback relic.</summary>
-    private static bool KeepIfAnyCardRemains(PackSnapshot before)
+    /// <summary>
+    /// Decides what happens when an edit empties a content type. Two different answers, because only
+    /// one of the three types has a floor that cannot be crossed:
+    ///
+    ///   • cards   — REFUSED. Something must remain, or <c>CardGuardService.Filter</c> runs out of
+    ///               substitutes and falls through to passing blocked cards along — the one path where
+    ///               a blocked card could still reach the screen.
+    ///   • potions — ALLOWED, and it turns the routes off: no potion rewards, no shop shelf,
+    ///               potion-granting relics inert (see <c>Patches/FullBanPatches.cs</c>). Without that
+    ///               suppression an empty pool would throw, which is why the two ship together.
+    ///   • events  — ALLOWED, and <c>?</c> map points stop resolving to event rooms. Same reason: the
+    ///               skip gate alone would run out of candidates and hand back a blocked event.
+    ///   • relics  — nothing to check: relics can't empty the card pool and an empty relic bag already
+    ///               resolves to the game's own fallback relic.
+    ///
+    /// A full ban raises an explanatory notice rather than a refusal — "you just turned potions off for
+    /// this run" is information, not an error.
+    /// </summary>
+    private static bool KeepIfFloorHolds(PackSnapshot before)
     {
-        if (before.Kind == Drill.ModRelics) return true;
-        if (EveryAffectedCharacterKeepsACard()) return true;
+        switch (before.Kind)
+        {
+            case Drill.ModRelics:
+                return true;
 
-        foreach (var (id, allowed) in before.Items) SetItemAllowed(before.Kind, id, allowed);
-        SetPackBlocked(before.Kind, before.Key, before.Blocked);
-        _notice = Loc.T("min_one");
-        MainFile.Logger.Info($"[{MainFile.ModId}] refused a block that would leave {_selected} with no cards at all.");
-        return false;
+            case Drill.PoolPotions:
+            case Drill.ModPotions:
+                if (!EveryAffectedCharacterKeeps(PotionGuardService.AnyPotionAllowedFor))
+                {
+                    _notice = Loc.T("full_ban_potion");
+                    MainFile.Logger.Info($"[{MainFile.ModId}] every potion is now blocked for {_selected} — potion routes will be suppressed.");
+                }
+                return true;
+
+            case Drill.ActEvents:
+            case Drill.ModEvents:
+                if (!EveryAffectedCharacterKeeps(EventGuardService.AnyEventAllowedFor))
+                {
+                    _notice = Loc.T("full_ban_event");
+                    MainFile.Logger.Info($"[{MainFile.ModId}] every event is now blocked for {_selected} — '?' rooms will not become events.");
+                }
+                return true;
+
+            default:
+                if (EveryAffectedCharacterKeeps(AnyCardAllowedFor)) return true;
+                foreach (var (id, allowed) in before.Items) SetItemAllowed(before.Kind, id, allowed);
+                SetPackBlocked(before.Kind, before.Key, before.Blocked);
+                _notice = Loc.T("min_one");
+                MainFile.Logger.Info($"[{MainFile.ModId}] refused a block that would leave {_selected} with no cards at all.");
+                return false;
+        }
     }
 
     private static string CountsSuffix(PackState s) =>
@@ -1324,7 +1932,7 @@ public static class CardGuardPanel
         {
             var before = Snapshot(kind, key);
             ApplyPackToggle(kind, key, v);
-            if (KeepIfAnyCardRemains(before)) CardGuardConfig.Save();
+            if (KeepIfFloorHolds(before)) CardGuardConfig.Save();
             // Deferred: this fires from the checkbox's own Toggled signal, and the rebuild frees it.
             Callable.From(RebuildRight).CallDeferred();
         });

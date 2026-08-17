@@ -46,8 +46,13 @@ internal static class CardGuardNet
     /// v4 (v0.8.0) adds the all-characters scope. No field changed — the block maps already carry
     /// arbitrary keys — but their MEANING did: a v3 peer would read the "*" key as a character named
     /// "*" and match it against nothing, so it would filter differently from the host instead of
-    /// identically. Bumping makes such a lobby run unfiltered rather than out of step.</summary>
-    public const int Protocol = 4;
+    /// identically. Bumping makes such a lobby run unfiltered rather than out of step.
+    ///
+    /// v5 (v0.9.0) adds the potion and map-event block lists (four more maps at the end of the
+    /// packet). A v4 peer would stop reading after the relic maps and leave potions and events
+    /// unfiltered while the host filtered them — a straight desync — so its config is discarded on
+    /// receipt and the lobby runs unfiltered instead.</summary>
+    public const int Protocol = 5;
 
     /// <summary>Defensive cap on decoded collection sizes (guards a misaligned/foreign packet).</summary>
     private const int MaxEntries = 100_000;
@@ -97,6 +102,10 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
     public Dictionary<string, List<string>>? relicModBlock;
     public Dictionary<string, List<string>>? cardBlock;
     public Dictionary<string, List<string>>? relicBlock;
+    public Dictionary<string, List<string>>? potionModBlock;
+    public Dictionary<string, List<string>>? potionBlock;
+    public Dictionary<string, List<string>>? eventModBlock;
+    public Dictionary<string, List<string>>? eventBlock;
 
     // Host sends directly to each peer; no onward relay needed.
     public readonly bool ShouldBroadcast => false;
@@ -113,6 +122,10 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
         CardGuardNet.WriteMap(writer, relicModBlock);
         CardGuardNet.WriteMap(writer, cardBlock);
         CardGuardNet.WriteMap(writer, relicBlock);
+        CardGuardNet.WriteMap(writer, potionModBlock);
+        CardGuardNet.WriteMap(writer, potionBlock);
+        CardGuardNet.WriteMap(writer, eventModBlock);
+        CardGuardNet.WriteMap(writer, eventBlock);
     }
 
     public void Deserialize(PacketReader reader)
@@ -124,6 +137,10 @@ internal struct CardGuardConfigMessage : INetMessage, IPacketSerializable
         relicModBlock = CardGuardNet.ReadMap(reader);
         cardBlock = CardGuardNet.ReadMap(reader);
         relicBlock = CardGuardNet.ReadMap(reader);
+        potionModBlock = CardGuardNet.ReadMap(reader);
+        potionBlock = CardGuardNet.ReadMap(reader);
+        eventModBlock = CardGuardNet.ReadMap(reader);
+        eventBlock = CardGuardNet.ReadMap(reader);
     }
 }
 

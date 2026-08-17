@@ -60,6 +60,11 @@ internal static class CoopTest
     /// </summary>
     private static readonly List<string> _victimRelics = new();
     private static readonly List<string> _victimCards = new();
+    /// <summary>Potion and map-event victims (v0.9.0). Same idea as the relic/card victims: derived
+    /// identically on both peers from ModelDb, blocked only on the HOST, so the client can only learn
+    /// about them through the host-config broadcast.</summary>
+    private static readonly List<string> _victimPotions = new();
+    private static readonly List<string> _victimEvents = new();
     /// <summary>The individually-blocked Ancient relic the host grants via the networked `relic`
     /// command — exercises the RelicCmd.Obtain swap under lockstep.</summary>
     private static string? _victimAncient;
@@ -210,11 +215,42 @@ internal static class CoopTest
             // what removes the victims and the test would prove nothing new.
             CardGuardService.SetModAllowed(TargetChar, TargetMod, true);
 
+            // Potions: EVERY potion, i.e. the full-ban path. Partial potion blocking is covered by
+            // solo-verify; what only a 2-instance run can show is that the SUPPRESSION agrees — both
+            // peers must generate no potion reward and an empty shop shelf, across the `room Shop`
+            // transition where the checksum fires. Sorted so both roles derive the same list unaided.
+            _victimPotions.AddRange(PotionGuardService.GetPotionGroups()
+                .SelectMany(g => g.Potions)
+                .Select(PotionGuardService.PotionIdOf)
+                .Where(id => id.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(id => id, StringComparer.Ordinal));
+
+            // Map events: EVERY event, the full-ban path again. What has to agree across peers is the
+            // DECISION to stop '?' points resolving to events — the roll that follows is the game's own
+            // and is identical once the candidate set is. Driving an actual '?' room from the harness is
+            // not an option: advancing one peer's map cursor would be the harness creating the desync it
+            // is trying to measure.
+            _victimEvents.AddRange(EventGuardService.GetEventGroups()
+                .SelectMany(g => g.Events)
+                .Select(EventGuardService.EventIdOf)
+                .Where(id => id.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(id => id, StringComparer.Ordinal));
+
+            W($"victims (potions/events, both roles derive these): potions=[{string.Join(", ", _victimPotions)}] "
+              + $"events=[{string.Join(", ", _victimEvents)}]");
+
             if (_isHost)
             {
                 foreach (var id in _victimRelics) RelicGuardService.SetRelicAllowed(TargetChar, id, false);
                 foreach (var id in _victimCards) CardGuardService.SetCardAllowed(TargetChar, id, false);
-                W($"HOST staged individual blocks: {_victimRelics.Count} relic(s), {_victimCards.Count} card(s) "
+                // Potions are scoped per character like cards; events are map-wide, so blocking them
+                // under the played character is exactly the union case the event gate resolves.
+                foreach (var id in _victimPotions) PotionGuardService.SetPotionAllowed(TargetChar, id, false);
+                foreach (var id in _victimEvents) EventGuardService.SetEventAllowed(TargetChar, id, false);
+                W($"HOST staged individual blocks: {_victimRelics.Count} relic(s), {_victimCards.Count} card(s), "
+                  + $"{_victimPotions.Count} potion(s), {_victimEvents.Count} event(s) "
                   + $"for '{TargetChar}' (pack '{TargetMod}' left ALLOWED) — rides the host-config broadcast");
             }
             else W("JOIN staged nothing locally (must learn the blocks from the host override)");
@@ -230,11 +266,79 @@ internal static class CoopTest
     /// this is the crux: it never set these locally, so a false here means the per-item maps did not
     /// survive the wire.
     /// </summary>
-    private static (bool relics, bool cards) OverrideApplied()
+    private static (bool relics, bool cards, bool potions, bool events) OverrideApplied()
     {
         bool r = _victimRelics.Count > 0 && _victimRelics.All(id => !RelicGuardService.GetRelicAllowed(TargetChar, id));
         bool c = _victimCards.Count > 0 && _victimCards.All(id => !CardGuardService.GetCardAllowed(TargetChar, id));
-        return (r, c);
+        bool p = _victimPotions.Count > 0 && _victimPotions.All(id => !PotionGuardService.GetPotionAllowed(TargetChar, id));
+        bool e = _victimEvents.Count > 0 && _victimEvents.All(id => !EventGuardService.GetEventAllowed(TargetChar, id));
+        return (r, c, p, e);
+    }
+
+    /// <summary>Card-pool titles of every player in the run — the union the event gate resolves against.</summary>
+    private static List<string> RunTitles(RunManager run)
+    {
+        var titles = new List<string>();
+        try
+        {
+            var players = run.State?.Players;
+            if (players != null)
+                foreach (var pl in players)
+                {
+                    string t;
+                    try { t = pl?.Character?.CardPool?.Title ?? string.Empty; }
+                    catch { continue; }
+                    if (t.Length > 0 && !titles.Contains(t, StringComparer.OrdinalIgnoreCase)) titles.Add(t);
+                }
+        }
+        catch { }
+        titles.Sort(StringComparer.Ordinal);
+        return titles;
+    }
+
+    /// <summary>
+    /// (potion options across all players, victim potions still offered, victim events still allowed).
+    ///
+    /// Read-only on purpose. The event cursor must NOT be advanced here: running the gate on one peer
+    /// only would itself desync the run this test exists to measure. So the event side asks the filter
+    /// for its verdict per event — exactly what the gate consults — instead of driving the gate.
+    /// </summary>
+    private static (int potionOptions, int victimPotions, int victimEventsAllowed) FilterCensus(RunManager run, List<string> ids)
+    {
+        int options = 0, victimPot = 0, victimEvtAllowed = 0;
+        try
+        {
+            var players = run.State?.Players;
+            if (players != null)
+                foreach (var pl in players.OrderBy(x => x.NetId))
+                {
+                    IEnumerable<PotionModel> opts;
+                    try { opts = MegaCrit.Sts2.Core.Factories.PotionFactory.GetPotionOptions(pl, Array.Empty<PotionModel>()); }
+                    catch { continue; }
+                    foreach (var pot in opts)
+                    {
+                        if (pot == null) continue;
+                        string pid = PotionGuardService.PotionIdOf(pot);
+                        options++;
+                        ids.Add("POT:" + pid);
+                        if (_victimPotions.Contains(pid, StringComparer.OrdinalIgnoreCase)) victimPot++;
+                    }
+                }
+
+            var titles = RunTitles(run);
+            ids.Add("FULLBAN:potion=" + PotionGuardService.IsFullyBannedFor(LocalPlayerOf(run)));
+            ids.Add("FULLBAN:event=" + EventGuardService.AreAllEventsBannedForAct(run.State, titles));
+            foreach (var g in EventGuardService.GetEventGroups())
+                foreach (var ev in g.Events)
+                {
+                    string eid = EventGuardService.EventIdOf(ev);
+                    bool blocked = EventGuardService.IsEventBlockedForAny(ev, titles);
+                    ids.Add("EVT:" + eid + (blocked ? ":X" : ":o"));
+                    if (!blocked && _victimEvents.Contains(eid, StringComparer.OrdinalIgnoreCase)) victimEvtAllowed++;
+                }
+        }
+        catch { }
+        return (options, victimPot, victimEvtAllowed);
     }
 
     private static async Task HostPhase(RunManager run)
@@ -354,9 +458,11 @@ internal static class CoopTest
             // its own prefix (SlayTheUniverse relics are RELIC.ODDMELT-*), so matching on the assembly
             // name would silently count zero and make the assertion vacuous.
             var (victim, mate) = CountVictims(run);
+            var (potOptions, victimPot, victimEvtAllowed) = FilterCensus(run, ids);
 
             return $"players={players.Count} inProgress=True items={ids.Count} victimInBag={victim} mateInBag={mate} "
-                 + $"obtainedTarget={obtainedTarget} modAncients={modAncients} sig={StableHash(ids):X8}";
+                 + $"obtainedTarget={obtainedTarget} modAncients={modAncients} potionOptions={potOptions} "
+                 + $"victimPotionOffered={victimPot} victimEventAllowed={victimEvtAllowed} sig={StableHash(ids):X8}";
         }
         catch (Exception e) { return "SNAPSHOT ERROR: " + e.Message; }
     }
@@ -442,7 +548,7 @@ internal static class CoopTest
     /// </summary>
     private static bool Verdict(RunManager run, string role)
     {
-        var (ovrRelics, ovrCards) = OverrideApplied();
+        var (ovrRelics, ovrCards, ovrPotions, ovrEvents) = OverrideApplied();
         var (victim, mate) = CountVictims(run);
         bool alive = run.State != null && run.IsInProgress;
         bool heldAncient = HoldsVictimAncient(run);
@@ -456,9 +562,55 @@ internal static class CoopTest
         // the lock-in fell through to pass-through and nothing is being filtered at all. Measured:
         // with the client's config pull disabled (pre-v0.7.0), host passThrough=True still produced
         // "RESULT: OK" while only the JOIN side caught the failure.
-        bool filtering = !RelicGuardService.IsPassThrough && !CardGuardService.IsPassThrough;
+        bool filtering = !RelicGuardService.IsPassThrough && !CardGuardService.IsPassThrough
+                         && !PotionGuardService.IsPassThrough && !EventGuardService.IsPassThrough;
         W($"{role}: assert filtering ACTIVE this run (not pass-through) = {filtering}");
-        W($"{role}: assert host block in EFFECT here — relics={ovrRelics}, cards={ovrCards}");
+        W($"{role}: assert host block in EFFECT here — relics={ovrRelics}, cards={ovrCards}, "
+          + $"potions={ovrPotions}, events={ovrEvents}");
+
+        var censusIds = new List<string>();
+        var (potOptions, victimPot, victimEvtAllowed) = FilterCensus(run, censusIds);
+        W($"{role}: assert blocked potions gone from the draw pool = {victimPot == 0} "
+          + $"({potOptions} option(s) across players, {victimPot} victim(s) still offered)");
+
+        // Full potion ban: the pool is empty on this peer, the guard agrees, and generating a reward set
+        // with a potion in it yields no potion — the three things that must match the other peer.
+        bool fullBanSeen = PotionGuardService.IsFullyBannedFor(LocalPlayerOf(run));
+        bool poolEmpty = potOptions == 0;
+        W($"{role}: assert potions read as fully banned here = {fullBanSeen} (pool empty = {poolEmpty})");
+        bool rewardSuppressed = RewardStrippedHere(run);
+        W($"{role}: assert a potion reward is suppressed rather than generated = {rewardSuppressed}");
+        bool shelfEmpty = ShopShelfEmptyHere(run);
+        W($"{role}: assert a merchant would stock no potions = {shelfEmpty}");
+
+        // Full event ban: the game's own candidate hook must drop RoomType.Event on BOTH peers. Pure
+        // read, no cursor moved — the signature above carries the same verdict so a divergence would
+        // also show up as a sig mismatch.
+        bool eventRoomsClosed = false;
+        string candidateDump = "(n/a)";
+        try
+        {
+            var state = run.State;
+            if (state != null)
+            {
+                var candidates = new HashSet<MegaCrit.Sts2.Core.Rooms.RoomType>
+                {
+                    MegaCrit.Sts2.Core.Rooms.RoomType.Monster,
+                    MegaCrit.Sts2.Core.Rooms.RoomType.Elite,
+                    MegaCrit.Sts2.Core.Rooms.RoomType.Treasure,
+                    MegaCrit.Sts2.Core.Rooms.RoomType.Shop,
+                    MegaCrit.Sts2.Core.Rooms.RoomType.Event,
+                };
+                var after = MegaCrit.Sts2.Core.Hooks.Hook.ModifyUnknownMapPointRoomTypes(state, candidates);
+                eventRoomsClosed = !after.Contains(MegaCrit.Sts2.Core.Rooms.RoomType.Event) && after.Count > 0;
+                candidateDump = string.Join(",", after.OrderBy(r => r));
+            }
+        }
+        catch (Exception e) { W("candidate probe failed: " + e.Message); }
+        W($"{role}: assert '?' points can no longer become events = {eventRoomsClosed} [{candidateDump}]");
+        W($"{role}: assert events read as fully banned here = {EventGuardService.AreAllEventsBannedForAct(run.State, RunTitles(run))}");
+        W($"{role}: assert blocked events read as blocked by the gate = {victimEvtAllowed == 0} "
+          + $"({victimEvtAllowed} victim(s) still allowed)");
         W($"{role}: assert individually-blocked ancient NOT held after networked grant = {!heldAncient}"
           + $"  [RelicCmd.Obtain swap under lockstep, ancient={_victimAncient ?? "(none)"}]");
         if (bagApplicable)
@@ -472,7 +624,46 @@ internal static class CoopTest
         W($"{role}: assert session alive after room transition = {alive}");
 
         bool bagOk = !bagApplicable || (victim == 0 && mate > 0);
-        return filtering && ovrRelics && ovrCards && !heldAncient && bagOk && alive;
+        return filtering && ovrRelics && ovrCards && ovrPotions && ovrEvents
+               && victimPot == 0 && victimEvtAllowed == 0
+               && fullBanSeen && poolEmpty && rewardSuppressed && shelfEmpty && eventRoomsClosed
+               && EventGuardService.AreAllEventsBannedForAct(run.State, RunTitles(run))
+               && !heldAncient && bagOk && alive;
+    }
+
+    /// <summary>Does a reward set built on this peer come back without its potion? Uses the game's own
+    /// inspect-without-offering entry point, so nothing is shown to either player.</summary>
+    private static bool RewardStrippedHere(RunManager run)
+    {
+        try
+        {
+            var me = LocalPlayerOf(run);
+            if (me == null) return false;
+            var set = new MegaCrit.Sts2.Core.Rewards.RewardsSet(me)
+                .WithCustomRewards(new List<MegaCrit.Sts2.Core.Rewards.Reward>
+                {
+                    new MegaCrit.Sts2.Core.Rewards.PotionReward(me),
+                    new MegaCrit.Sts2.Core.Rewards.GoldReward(10, 20, me),
+                });
+            set.GenerateWithoutOffering().GetAwaiter().GetResult();
+            return set.Rewards.All(r => r is not MegaCrit.Sts2.Core.Rewards.PotionReward)
+                   && set.Rewards.Count > 0;
+        }
+        catch (Exception e) { W("reward strip probe failed: " + e.Message); return false; }
+    }
+
+    /// <summary>Would a merchant on this peer stock any potion? Builds a throwaway inventory; the real
+    /// shop the host jumps to is a separate instance and is untouched by this.</summary>
+    private static bool ShopShelfEmptyHere(RunManager run)
+    {
+        try
+        {
+            var me = LocalPlayerOf(run);
+            if (me == null) return false;
+            var inv = MegaCrit.Sts2.Core.Entities.Merchant.MerchantInventory.CreateForNormalMerchant(me);
+            return inv.PotionEntries.Count == 0;
+        }
+        catch (Exception e) { W("shop shelf probe failed: " + e.Message); return false; }
     }
 
     private static void CollectBag(RelicGrabBag? bag, List<string> ids)

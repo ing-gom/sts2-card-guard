@@ -31,6 +31,53 @@ internal static class MultiplayerSync
 {
     private static readonly object _gate = new();
 
+    // ── The four guard services, in ONE place ────────────────────────────────────────────────────
+    //
+    // ★Every multiplayer state transition goes through the three helpers below, because listing the
+    // services at each call site is how potion and event filtering silently died in singleplayer:
+    // v0.9.0 added them to this file's four transitions but not to
+    // <c>Patches/MultiplayerPatches.cs</c>'s singleplayer reset, which still cleared only cards and
+    // relics. Every SP run therefore started a lobby (character select builds one, type=Singleplayer),
+    // took the fail-safe DisableAllFiltering below, and never came back out for potions and events —
+    // so both stayed pass-through for the whole run and quietly did nothing. Reported from real play
+    // as "I filtered potions and the shop still sells them"; the log gave it away by containing not one
+    // potion-filter line.
+    //
+    // Adding a fifth guard means editing only these three methods.
+
+    /// <summary>Fail-safe baseline: nothing filters until a run start explicitly decides otherwise.</summary>
+    public static void DisableAllFiltering()
+    {
+        CardGuardService.DisableMpFiltering();
+        RelicGuardService.DisableMpFiltering();
+        PotionGuardService.DisableMpFiltering();
+        EventGuardService.DisableMpFiltering();
+    }
+
+    /// <summary>Filter with this machine's own config (host of a networked run).</summary>
+    public static void ActivateAllLocal()
+    {
+        CardGuardService.ActivateMpLocal();
+        RelicGuardService.ActivateMpLocal();
+        PotionGuardService.ActivateMpLocal();
+        EventGuardService.ActivateMpLocal();
+    }
+
+    /// <summary>Back to plain singleplayer: local config, no override, filtering ON.</summary>
+    public static void ClearAllMpState()
+    {
+        CardGuardService.ClearMpState();
+        RelicGuardService.ClearMpState();
+        PotionGuardService.ClearMpState();
+        EventGuardService.ClearMpState();
+    }
+
+    /// <summary>Is any guard still in pass-through? The self-tests assert this is false in a normal
+    /// run — a guard left pass-through is invisible except as "the filter does nothing".</summary>
+    public static bool AnyPassThrough =>
+        CardGuardService.IsPassThrough || RelicGuardService.IsPassThrough
+        || PotionGuardService.IsPassThrough || EventGuardService.IsPassThrough;
+
     // The lobby's net service we currently have handlers registered on (for clean re-registration).
     private static INetGameService? _net;
 
@@ -44,6 +91,10 @@ internal static class MultiplayerSync
     private static Dictionary<string, List<string>>? _hostRelicMod;
     private static Dictionary<string, List<string>>? _hostCard;
     private static Dictionary<string, List<string>>? _hostRelic;
+    private static Dictionary<string, List<string>>? _hostPotionMod;
+    private static Dictionary<string, List<string>>? _hostPotion;
+    private static Dictionary<string, List<string>>? _hostEventMod;
+    private static Dictionary<string, List<string>>? _hostEvent;
 
     /// <summary>
     /// Called when a <see cref="StartRunLobby"/> is constructed (host or client). Resets per-lobby
@@ -65,6 +116,10 @@ internal static class MultiplayerSync
                 _hostRelicMod = null;
                 _hostCard = null;
                 _hostRelic = null;
+                _hostPotionMod = null;
+                _hostPotion = null;
+                _hostEventMod = null;
+                _hostEvent = null;
 
                 if (!ReferenceEquals(_net, net))
                 {
@@ -78,8 +133,7 @@ internal static class MultiplayerSync
             // Fail-safe baseline for the upcoming run: filtering OFF until LockInForRun explicitly
             // turns it on. If any run-start path ever bypasses the lock-in, we stay pass-through
             // (mod does nothing) rather than filtering with un-synced local config (which desyncs).
-            CardGuardService.DisableMpFiltering();
-            RelicGuardService.DisableMpFiltering();
+            DisableAllFiltering();
 
             if (net.Type == NetGameType.Host)
             {
@@ -161,6 +215,8 @@ internal static class MultiplayerSync
         {
             var (cross, mod, card) = CardGuardService.SnapshotLocalBlocks();
             var (relicMod, relic) = RelicGuardService.SnapshotLocalBlocks();
+            var (potionMod, potion) = PotionGuardService.SnapshotLocalBlocks();
+            var (eventMod, ev) = EventGuardService.SnapshotLocalBlocks();
             var msg = new CardGuardConfigMessage
             {
                 magic = CardGuardNet.Magic,
@@ -170,9 +226,14 @@ internal static class MultiplayerSync
                 relicModBlock = relicMod,
                 cardBlock = card,
                 relicBlock = relic,
+                potionModBlock = potionMod,
+                potionBlock = potion,
+                eventModBlock = eventMod,
+                eventBlock = ev,
             };
             net.SendMessage(msg);
-            Log.Info($"host config broadcast ({cross.Count} char-block set(s), {mod.Count} mod-block set(s), {relicMod.Count} relic-mod set(s), {card.Count} card-block set(s), {relic.Count} relic-block set(s)).");
+            Log.Info($"host config broadcast ({cross.Count} char-block set(s), {mod.Count} mod-block set(s), {relicMod.Count} relic-mod set(s), {card.Count} card-block set(s), {relic.Count} relic-block set(s), "
+                     + $"{potionMod.Count} potion-mod set(s), {potion.Count} potion-block set(s), {eventMod.Count} event-mod set(s), {ev.Count} event-block set(s)).");
         }
         catch (Exception ex) { Log.Warn($"SendConfigToAll failed: {ex.Message}"); }
     }
@@ -206,6 +267,10 @@ internal static class MultiplayerSync
                 _hostRelicMod = msg.relicModBlock ?? new Dictionary<string, List<string>>();
                 _hostCard = msg.cardBlock ?? new Dictionary<string, List<string>>();
                 _hostRelic = msg.relicBlock ?? new Dictionary<string, List<string>>();
+                _hostPotionMod = msg.potionModBlock ?? new Dictionary<string, List<string>>();
+                _hostPotion = msg.potionBlock ?? new Dictionary<string, List<string>>();
+                _hostEventMod = msg.eventModBlock ?? new Dictionary<string, List<string>>();
+                _hostEvent = msg.eventBlock ?? new Dictionary<string, List<string>>();
                 _hostConfigReceived = true;
             }
             // Acknowledge so the host knows it may safely enable filtering for the run.
@@ -260,14 +325,12 @@ internal static class MultiplayerSync
                     bool allAcked = AllConnectedPeersAcked(net);
                     if (allAcked)
                     {
-                        CardGuardService.ActivateMpLocal();
-                        RelicGuardService.ActivateMpLocal();
+                        ActivateAllLocal();
                         Log.Info("MP lock-in (host): all peers acked → filtering with host config.");
                     }
                     else
                     {
-                        CardGuardService.DisableMpFiltering();
-                        RelicGuardService.DisableMpFiltering();
+                        DisableAllFiltering();
                         Log.Warn("MP lock-in (host): a peer did not ack (missing/old mod) → filtering OFF this run.");
                     }
                     break;
@@ -276,11 +339,14 @@ internal static class MultiplayerSync
                 {
                     bool have;
                     Dictionary<string, List<string>>? cross, mod, relicMod, card, relic;
+                    Dictionary<string, List<string>>? potionMod, potion, eventMod, ev;
                     lock (_gate)
                     {
                         have = _hostConfigReceived;
                         cross = _hostCross; mod = _hostMod; relicMod = _hostRelicMod;
                         card = _hostCard; relic = _hostRelic;
+                        potionMod = _hostPotionMod; potion = _hostPotion;
+                        eventMod = _hostEventMod; ev = _hostEvent;
                     }
                     if (have)
                     {
@@ -288,28 +354,27 @@ internal static class MultiplayerSync
                         RelicGuardService.ActivateMpOverride(
                             relicMod ?? new Dictionary<string, List<string>>(),
                             relic ?? new Dictionary<string, List<string>>());
+                        PotionGuardService.ActivateMpOverride(potionMod, potion);
+                        EventGuardService.ActivateMpOverride(eventMod, ev);
                         Log.Info("MP lock-in (client): applying host config (own settings ignored this run).");
                     }
                     else
                     {
-                        CardGuardService.DisableMpFiltering();
-                        RelicGuardService.DisableMpFiltering();
+                        DisableAllFiltering();
                         Log.Warn("MP lock-in (client): host config not received (host missing mod?) → filtering OFF this run.");
                     }
                     break;
                 }
                 default:
                     // Singleplayer / fake-multiplayer: use local config normally.
-                    CardGuardService.ClearMpState();
-                    RelicGuardService.ClearMpState();
+                    ClearAllMpState();
                     break;
             }
         }
         catch (Exception ex)
         {
             Log.Warn($"LockInForRun failed ({ex.Message}) → disabling filtering to stay safe.");
-            try { CardGuardService.DisableMpFiltering(); } catch { }
-            try { RelicGuardService.DisableMpFiltering(); } catch { }
+            try { DisableAllFiltering(); } catch { }
         }
     }
 

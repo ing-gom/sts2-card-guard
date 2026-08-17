@@ -6,17 +6,24 @@ using MegaCrit.Sts2.Core.Modding;
 namespace Sts2CardGuard;
 
 /// <summary>
-/// Entry point. Installs Harmony patches that filter the candidate card pool used by card
-/// rewards, shops, events, and in-combat card generation so that only the current character's
-/// cards (+ colorless, + any cross-allowed characters) and non-foreign-mod cards can appear.
-/// Behaviour is configurable in-game via ModConfig; defaults are strict (own character +
-/// colorless only). See <see cref="CardGuardService"/>.
+/// Entry point. Installs Harmony patches that filter what a run can offer, all before the game's RNG
+/// picks, so nothing needs to be un-picked afterwards:
+///
+///   • cards   — the candidate pool used by rewards, shops, events and in-combat generation
+///               (<see cref="CardGuardService"/>);
+///   • relics  — the run's relic grab bags plus direct event grants (<see cref="RelicGuardService"/>);
+///   • potions — every pool random potion generation draws from (<see cref="PotionGuardService"/>);
+///   • events  — the act's event list, by continuing the game's own skip walk
+///               (<see cref="EventGuardService"/>).
+///
+/// Everything defaults to ALLOWED and is configured from the character-select screen's Content Filter
+/// button; nothing depends on ModConfig.
 /// </summary>
 [ModInitializer(nameof(Initialize))]
 public partial class MainFile : Node
 {
     public const string ModId = "Sts2CardGuard";
-    public const string Version = "v0.8.0";
+    public const string Version = "v0.9.0";
 
     public static MegaCrit.Sts2.Core.Logging.Logger Logger { get; }
         = new(ModId, MegaCrit.Sts2.Core.Logging.LogType.Generic);
@@ -35,8 +42,8 @@ public partial class MainFile : Node
             // Register UI strings for the current language now; the SetLanguage patch re-applies on change.
             try { Loc.Apply(MegaCrit.Sts2.Core.Localization.LocManager.Instance); } catch { }
 
-            Logger.Info($"[{ModId}] initialized ({Version}). Default policy: current character + colorless only. "
-                        + "Settings: main menu → 'Card Guard' button (below the play button).");
+            Logger.Info($"[{ModId}] initialized ({Version}). Default policy: everything allowed. "
+                        + "Settings: character select → 'Content Filter' button (bottom right).");
 
 #if DEBUG
             // No-op unless a matching sentinel sits next to the mod DLL (solo-verify / coop-verify).

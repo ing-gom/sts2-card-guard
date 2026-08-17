@@ -28,7 +28,11 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
+using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Odds;
+using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.TestSupport;
@@ -127,6 +131,14 @@ internal static class SoloTest
         {
             var character = ModelDb.AllCharacters.First();
             var acts = ActModel.GetDefaultList().ToList();
+
+            // ★Simulate what character select does before any run: constructing a StartRunLobby (even a
+            // solo one) puts every guard into the pass-through fail-safe. The harness starts runs by
+            // calling StartNewSingleplayerRun directly, so without this it never exercised the reset
+            // that brings them back — which is exactly how potion/event filtering shipped doing nothing
+            // in singleplayer while every assert here passed.
+            Multiplayer.MultiplayerSync.DisableAllFiltering();
+            W($"pre-run: forced the lobby fail-safe — anyPassThrough={Multiplayer.MultiplayerSync.AnyPassThrough}");
             await NGame.Instance.StartNewSingleplayerRun(character, shouldSave: false, acts,
                 Array.Empty<ModifierModel>(), "SOLOTEST", GameMode.Standard, 0);
             await Task.Delay(3000);
@@ -136,6 +148,13 @@ internal static class SoloTest
             { W("run did not start"); Flush(false); return; }
             var player = run.State!.Players.First();
             W($"run started: {player.Character?.Id.Entry}, floor {run.State.TotalFloor}");
+
+            // The reset the run start is supposed to perform. Every filter below is meaningless if a
+            // guard is still in pass-through, so this is asserted before anything else runs.
+            bool okMpState = !Multiplayer.MultiplayerSync.AnyPassThrough;
+            W($"assert: no guard left in pass-through after a singleplayer run start = {okMpState} "
+              + $"(card={CardGuardService.IsPassThrough}, relic={RelicGuardService.IsPassThrough}, "
+              + $"potion={PotionGuardService.IsPassThrough}, event={EventGuardService.IsPassThrough})");
 
             StartAutomation();
             await Shot("1_run");
@@ -149,14 +168,21 @@ internal static class SoloTest
             bool okPhilEdge = await RunPhilosophersEdgeTest(player);
             bool okBaseClamp = RunBaseCardClampTest(player);
             bool okAllScope = RunAllScopeTest(player);
+            bool okPotion = RunPotionFilterTest(player);
+            bool okEvent = RunEventBlockTest(player);
+            bool okShopPartial = RunShopPartialBanTest(player);
+            bool okFullBan = await RunFullBanTest(player);
             await ShotPanel(player);
 
             bool ok = okBag && okRelicOne && okCardOne && okCfg && okLink && okPhil && okPhilEdge
-                      && okBaseClamp && okAllScope && _hoverOk;
+                      && okBaseClamp && okAllScope && okPotion && okEvent && okShopPartial && okFullBan
+                      && okMpState && _hoverOk;
             W($"=== summary: grabbag/ancient={okBag}, individual-relic={okRelicOne}, "
               + $"individual-card={okCardOne}, config-roundtrip={okCfg}, pack-linkage={okLink}, "
               + $"philosophers={okPhil}, philosophers-edge={okPhilEdge}, base-clamp={okBaseClamp}, "
-              + $"all-scope={okAllScope}, hover-preview={_hoverOk} ===");
+              + $"all-scope={okAllScope}, potion={okPotion}, event={okEvent}, "
+              + $"shop-partial={okShopPartial}, full-ban={okFullBan}, mp-state={okMpState}, "
+              + $"hover-preview={_hoverOk} ===");
 
             await Shot("2_final");
             W("=== solo test done ===");
@@ -189,7 +215,6 @@ internal static class SoloTest
             return false;
         }
 
-        RelicGuardService.ClearMpState(); // normal single-player mode (local config)
         string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
         W($"configuring FOR character: {charTitle}");
 
@@ -653,6 +678,490 @@ internal static class SoloTest
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Potions. Two assertions on the real generation path:
+    //   1) a blocked potion disappears from PotionFactory.GetPotionOptions — the set every random
+    //      potion (rewards, shops, relics, cards, potion events) is drawn from — while its pool-mates
+    //      stay;
+    //   2) with only ONE potion left allowed, drawing still yields that potion and never a null. The
+    //      factory rolls a RARITY first, so a thinned pool can leave the rolled rarity empty; this is
+    //      what proves the game clamps to what is available (it does) instead of handing back a null
+    //      that every caller dereferences (which is what a decompile of CreateRandomPotion suggests);
+    //   3) and with EVERY potion blocked it throws — the reason the panel keeps a "one must remain"
+    //      floor. Asserting the throw stops that floor being removed later as apparently pointless.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every potion id the panel can block, with its current allowed state — so a test can start from a
+    /// known-permissive baseline and put the user's real configuration back afterwards.
+    ///
+    /// ★Needed because the settings file is the PLAYER's: this repo has already lost two test runs to
+    /// ambient blocks (70 ironclad cards once, 48 ironclad potions later) making a test's premise false
+    /// and the failure look like a regression.
+    /// </summary>
+    private static List<(string Id, bool Allowed)> SnapshotPotionState(string charTitle)
+    {
+        var snapshot = new List<(string, bool)>();
+        foreach (var id in PotionGuardService.GetPotionGroups()
+                     .SelectMany(g => g.Potions)
+                     .Select(PotionGuardService.PotionIdOf)
+                     .Where(i => i.Length > 0)
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+            snapshot.Add((id, PotionGuardService.GetPotionAllowed(charTitle, id)));
+        return snapshot;
+    }
+
+    private static void RestorePotionState(string charTitle, List<(string Id, bool Allowed)> snapshot)
+    {
+        foreach (var (id, allowed) in snapshot) PotionGuardService.SetPotionAllowed(charTitle, id, allowed);
+    }
+
+    private static bool RunPotionFilterTest(Player player)
+    {
+        Step("potion: baseline options");
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+        var none = Array.Empty<PotionModel>();
+
+        // Start permissive whatever the player's own config says; restored in the finally.
+        var ambient = SnapshotPotionState(charTitle);
+        int ambientBlocked = ambient.Count(a => !a.Allowed);
+        if (ambientBlocked > 0) W($"(clearing {ambientBlocked} potion block(s) from the live config for this test)");
+        foreach (var (id, _) in ambient) PotionGuardService.SetPotionAllowed(charTitle, id, true);
+
+        List<PotionModel> baseline;
+        try { baseline = PotionFactory.GetPotionOptions(player, none).Where(p => p != null).Distinct().ToList(); }
+        catch (Exception e) { W($"assert: GetPotionOptions THREW: {e.Message}"); return false; }
+        W($"baseline potion options: {baseline.Count}");
+        if (baseline.Count < 2) { W("assert: fewer than 2 potions available — cannot tell blocking from emptiness. SKIP."); return true; }
+
+        var victim = baseline[0];
+        string victimId = PotionGuardService.PotionIdOf(victim);
+        W($"victim: '{victimId}' ({victim.Rarity}), pool groups={PotionGuardService.GetPotionGroups().Count}");
+
+        Step("potion: block ONE potion");
+        PotionGuardService.SetPotionAllowed(charTitle, victimId, false);
+        List<PotionModel> filtered;
+        try { filtered = PotionFactory.GetPotionOptions(player, none).Where(p => p != null).Distinct().ToList(); }
+        catch (Exception e) { W($"assert: GetPotionOptions THREW after block: {e.Message}"); PotionGuardService.SetPotionAllowed(charTitle, victimId, true); return false; }
+
+        bool victimGone = !filtered.Any(p => PotionGuardService.PotionIdOf(p) == victimId);
+        bool matesKept = filtered.Count == baseline.Count - 1;
+        W($"assert: blocked potion removed = {victimGone}");
+        W($"assert: every other potion kept = {matesKept} ({baseline.Count} -> {filtered.Count})");
+
+        Step("potion: rarity starvation — leave exactly one potion allowed");
+        var survivor = filtered.Count > 0 ? filtered[0] : victim;
+        string survivorId = PotionGuardService.PotionIdOf(survivor);
+        foreach (var p in baseline)
+        {
+            string id = PotionGuardService.PotionIdOf(p);
+            if (id != survivorId) PotionGuardService.SetPotionAllowed(charTitle, id, false);
+        }
+
+        bool drawOk;
+        try
+        {
+            // 20 draws because the rarity roll is random: if the game did honour an empty rarity, a
+            // survivor of a rare-only pool would come back null most of the time, so 20 clean draws
+            // cannot be luck.
+            var singles = new List<PotionModel?>();
+            for (int i = 0; i < 20; i++)
+                singles.Add(PotionFactory.CreateRandomPotionOutOfCombat(player, player.PlayerRng.Shops));
+            int nulls = singles.Count(p => p == null);
+            int wrong = singles.Count(p => p != null && PotionGuardService.PotionIdOf(p) != survivorId);
+            drawOk = nulls == 0 && wrong == 0;
+            W($"assert: 20 single draws, 1 allowed potion ({survivor.Rarity}) -> {nulls} null, {wrong} not the survivor = {drawOk}");
+
+            // The merchant's 3-in-one-call. How MANY it returns when the pool is that thin is the
+            // game's business (measured: it clamps to 1) — what must hold is no nulls and nothing
+            // blocked, so that is what is asserted and the count is only reported.
+            var batch = PotionFactory.CreateRandomPotionsOutOfCombat(player, 3, player.PlayerRng.Shops);
+            int batchNulls = batch.Count(p => p == null);
+            int batchWrong = batch.Count(p => p != null && PotionGuardService.PotionIdOf(p) != survivorId);
+            W($"assert: 3-draw -> {batch.Count} entr(ies), {batchNulls} null, {batchWrong} not the survivor "
+              + $"[{string.Join(", ", batch.Select(p => p == null ? "<null>" : p.Id.Entry))}]");
+            drawOk = drawOk && batchNulls == 0 && batchWrong == 0;
+        }
+        catch (Exception e)
+        {
+            W($"assert: starved draw THREW: {e.Message}");
+            drawOk = false;
+        }
+
+        Step("potion: empty pool must throw (this is what the panel's floor prevents)");
+        bool floorNeeded;
+        PotionGuardService.SetPotionAllowed(charTitle, survivorId, false);
+        try
+        {
+            var doomed = PotionFactory.CreateRandomPotionOutOfCombat(player, player.PlayerRng.Shops);
+            floorNeeded = false;
+            W($"assert: draw from an EMPTY pool threw = False (returned '{(doomed == null ? "<null>" : doomed.Id.Entry)}') "
+              + "— re-check whether the one-potion floor is still load-bearing");
+        }
+        catch (Exception e)
+        {
+            floorNeeded = true;
+            W($"assert: draw from an EMPTY pool threw = True ({e.GetType().Name}) — floor is load-bearing");
+        }
+        bool floorRefuses = !PotionGuardService.AnyPotionAllowedFor(charTitle);
+        W($"assert: AnyPotionAllowedFor reports the empty pool = {floorRefuses} (this is what the panel refuses on)");
+
+        // Put the player's own configuration back, not merely "everything allowed".
+        RestorePotionState(charTitle, ambient);
+
+        return victimGone && matesKept && drawOk && floorNeeded && floorRefuses;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Map events. Drives the real gate — RoomSet.EnsureNextEventIsValid, the sole thing
+    // ActModel.PullNextEvent consults — and asserts a blocked event is stepped over for an event that
+    // is itself allowed and unvisited. The act's event cursor is restored afterwards, so the live run
+    // is left exactly as it was found.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static bool RunEventBlockTest(Player player)
+    {
+        Step("event: locate the act's event list");
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+        var state = RunManager.Instance?.State;
+        var act = state?.Act;
+        var rooms = act?._rooms;
+        if (state == null || rooms == null || rooms.events.Count < 2)
+        {
+            W($"assert: no usable act event list (events={rooms?.events.Count ?? -1}). SKIP.");
+            return true;
+        }
+
+        int cursor = rooms.eventsVisited;
+        W($"event list: {rooms.events.Count} entries, cursor {cursor}, groups={EventGuardService.GetEventGroups().Count}");
+        try
+        {
+            rooms.EnsureNextEventIsValid(state);
+            var before = rooms.NextEvent;
+            string beforeId = EventGuardService.EventIdOf(before);
+            W($"baseline next event: '{beforeId}'");
+
+            Step("event: block that event, re-run the gate");
+            EventGuardService.SetEventAllowed(charTitle, beforeId, false);
+            rooms.eventsVisited = cursor;
+            rooms.EnsureNextEventIsValid(state);
+            var after = rooms.NextEvent;
+            string afterId = EventGuardService.EventIdOf(after);
+
+            Step("event verdict");
+            var titles = new[] { charTitle };
+            bool moved = afterId != beforeId;
+            bool afterAllowed = !EventGuardService.IsEventBlockedForAny(after, titles);
+            bool afterValid = after.IsAllowed(state) && !state.VisitedEventIds.Contains(after.Id);
+            W($"assert: gate moved off the blocked event = {moved} ('{beforeId}' -> '{afterId}')");
+            W($"assert: replacement is not blocked = {afterAllowed}");
+            W($"assert: replacement still satisfies the game's own conditions = {afterValid}");
+
+            EventGuardService.SetEventAllowed(charTitle, beforeId, true);
+            return moved && afterAllowed && afterValid;
+        }
+        catch (Exception e)
+        {
+            W($"assert: event gate THREW: {e.Message}");
+            return false;
+        }
+        finally
+        {
+            rooms.eventsVisited = cursor; // leave the live run's cursor where we found it
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // The shop under a PARTIAL potion ban — reported from real play as "I filtered potions for a
+    // character and the shop is still selling potions".
+    //
+    // Nothing covered this combination before: the potion test asserts on GetPotionOptions, and the
+    // full-ban test asserts an EMPTY shelf. Neither answers "does a shop that still HAS potions only
+    // stock allowed ones". Twenty inventories, because each one draws three potions and a single shop
+    // could miss the blocked ones by luck.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static bool RunShopPartialBanTest(Player player)
+    {
+        Step("shop partial ban: block half the potions this character can be offered");
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+
+        var ambient = SnapshotPotionState(charTitle);
+        int ambientBlocked = ambient.Count(a => !a.Allowed);
+        if (ambientBlocked > 0) W($"(clearing {ambientBlocked} potion block(s) from the live config for this test)");
+        foreach (var (id, _) in ambient) PotionGuardService.SetPotionAllowed(charTitle, id, true);
+
+        var offered = new List<PotionModel>();
+        try
+        {
+            offered = PotionFactory.GetPotionOptions(player, Array.Empty<PotionModel>())
+                .Where(p => p != null).Distinct().ToList();
+        }
+        catch (Exception e) { W($"GetPotionOptions failed: {e.Message} — SKIP."); RestorePotionState(charTitle, ambient); return true; }
+        if (offered.Count < 4)
+        {
+            W($"only {offered.Count} potion(s) offered — SKIP.");
+            RestorePotionState(charTitle, ambient);
+            return true;
+        }
+
+        // Block every OTHER potion by id order, so both rarities and pools are mixed on each side and
+        // the shop still has plenty to stock from.
+        var ordered = offered.OrderBy(PotionGuardService.PotionIdOf, StringComparer.Ordinal).ToList();
+        var blocked = new HashSet<string>(
+            ordered.Where((_, i) => i % 2 == 0).Select(PotionGuardService.PotionIdOf),
+            StringComparer.OrdinalIgnoreCase);
+
+        bool optionsOk = false, shopOk = false, notEmptyOk = false;
+        try
+        {
+            foreach (var id in blocked) PotionGuardService.SetPotionAllowed(charTitle, id, false);
+            W($"blocked {blocked.Count} of {ordered.Count} potion(s) for '{charTitle}' (partial, not a full ban); "
+              + $"fullyBanned={PotionGuardService.IsFullyBannedFor(player)}");
+
+            var stillOffered = PotionFactory.GetPotionOptions(player, Array.Empty<PotionModel>())
+                .Where(p => p != null).Select(PotionGuardService.PotionIdOf).ToList();
+            int leaked = stillOffered.Count(id => blocked.Contains(id));
+            optionsOk = leaked == 0 && stillOffered.Count > 0;
+            W($"assert: draw pool holds no blocked potion = {optionsOk} "
+              + $"({stillOffered.Count} offered, {leaked} blocked leaked)");
+
+            // The reported path: real merchant inventories, built the way a shop room builds them.
+            int stocked = 0, shopLeaks = 0;
+            for (int i = 0; i < 20; i++)
+            {
+                var inv = MerchantInventory.CreateForNormalMerchant(player);
+                foreach (var entry in inv.PotionEntries)
+                {
+                    var model = entry?.Model;
+                    if (model == null) continue;
+                    stocked++;
+                    if (blocked.Contains(PotionGuardService.PotionIdOf(model))) shopLeaks++;
+                }
+            }
+            shopOk = shopLeaks == 0;
+            notEmptyOk = stocked > 0;
+            W($"assert: 20 merchant shelves stock no blocked potion = {shopOk} "
+              + $"({stocked} potion(s) stocked, {shopLeaks} blocked)");
+            W($"assert: a partial ban still leaves the shop selling potions = {notEmptyOk} "
+              + "(a partial block is a filter, not a ban — an empty shelf here would be the bug)");
+        }
+        catch (Exception e) { W($"shop partial ban exception: {e}"); }
+        finally
+        {
+            RestorePotionState(charTitle, ambient);
+            W("restored the player's own potion configuration");
+        }
+
+        return optionsOk && shopOk && notEmptyOk;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Full ban. Blocking EVERY potion / event is a supported state, and the point of it is that the
+    // sources stop existing rather than thinning out. Both halves are asserted:
+    //
+    //   potions — the batch draw returns nothing instead of throwing, a potion reward populates to
+    //             nothing and is dropped from its set, the merchant stocks no potions, and a
+    //             potion-granting relic no-ops. Every one of these throws without the guards (the
+    //             empty-pool InvalidOperationException measured in the potion test above).
+    //   events  — the game's own candidate-type hook no longer offers RoomType.Event, so a '?' cannot
+    //             resolve to an event room. Rolled repeatedly, since one roll proves little.
+    //
+    // Ends with a real shop room + screenshot: removing the potion shelf also has to remove its slot
+    // NODES, or DefaultFocusedControl dereferences a null Entry once the other slots sell out. That is
+    // a layout/crash question no logic assert can answer.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static async Task<bool> RunFullBanTest(Player player)
+    {
+        Step("full ban: block every potion for this character");
+        string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
+
+        var ambientPotions = SnapshotPotionState(charTitle);
+        var everyPotion = ambientPotions.Select(a => a.Id).ToList();
+        var everyEvent = EventGuardService.GetEventGroups()
+            .SelectMany(g => g.Events)
+            .Select(EventGuardService.EventIdOf)
+            .Where(id => id.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        bool batchOk = false, rewardOk = false, stripOk = false, shelfOk = false, relicOk = false;
+        bool hookOk = false, rollOk = false, bannedOk = false, eventBannedOk = false, slotNodesOk = false;
+        try
+        {
+            foreach (var id in everyPotion) PotionGuardService.SetPotionAllowed(charTitle, id, false);
+            bannedOk = PotionGuardService.IsFullyBannedFor(player);
+            W($"assert: potions read as fully banned = {bannedOk} ({everyPotion.Count} blocked)");
+
+            Step("full ban: batch draw returns nothing rather than throwing");
+            try
+            {
+                var batch = PotionFactory.CreateRandomPotionsOutOfCombat(player, 3, player.PlayerRng.Shops);
+                batchOk = batch.Count == 0;
+                W($"assert: 3-potion batch draw is empty = {batchOk} ({batch.Count} returned)");
+            }
+            catch (Exception e) { W($"assert: batch draw THREW: {e.Message}"); }
+
+            Step("full ban: potion reward populates to nothing and is dropped from its set");
+            try
+            {
+                var reward = new PotionReward(player);
+                reward.Populate();
+                rewardOk = !reward.IsPopulated;
+                W($"assert: potion reward left unpopulated (no throw) = {rewardOk}");
+
+                // The game's own inspect-without-offering entry point, so this is the real strip path.
+                var set = new RewardsSet(player).WithCustomRewards(new List<Reward>
+                {
+                    new PotionReward(player),
+                    new GoldReward(10, 20, player),
+                });
+                await set.GenerateWithoutOffering();
+                int potions = set.Rewards.Count(r => r is PotionReward);
+                int others = set.Rewards.Count(r => r is not PotionReward);
+                stripOk = potions == 0 && others > 0;
+                W($"assert: potion reward dropped from the set, others kept = {stripOk} "
+                  + $"({potions} potion, {others} other)");
+            }
+            catch (Exception e) { W($"assert: reward path THREW: {e.Message}"); }
+
+            Step("full ban: merchant stocks no potions");
+            try
+            {
+                var inv = MerchantInventory.CreateForNormalMerchant(player);
+                shelfOk = inv.PotionEntries.Count == 0;
+                W($"assert: merchant potion shelf empty = {shelfOk} ({inv.PotionEntries.Count} entr(ies), "
+                  + $"cards={inv.CharacterCardEntries.Count}, relics={inv.RelicEntries.Count})");
+            }
+            catch (Exception e) { W($"assert: merchant build THREW: {e.Message}"); }
+
+            Step("full ban: a potion-granting relic no-ops instead of throwing");
+            try
+            {
+                var frond = ModelDb.Relic<MegaCrit.Sts2.Core.Models.Relics.DelicateFrond>().ToMutable();
+                await RelicCmd.Obtain(frond, player);
+                await Task.Delay(300);
+                int before = player.Potions.Count(p => p != null);
+                await frond.BeforeCombatStart();
+                int after = player.Potions.Count(p => p != null);
+                relicOk = after == before;
+                W($"assert: Delicate Frond granted nothing and did not throw = {relicOk} "
+                  + $"(potions held {before} -> {after})");
+            }
+            catch (Exception e) { W($"assert: potion relic THREW: {e.Message}"); }
+
+            Step("full ban: block every event, then ask the game's own candidate hook");
+            foreach (var id in everyEvent) EventGuardService.SetEventAllowed(charTitle, id, false);
+            var titles = new[] { charTitle };
+            var state = RunManager.Instance?.State;
+            // Judged against the ACT's own event list, which is what the suppression consults — see
+            // AreAllEventsBannedForAct on why the discovered list is the wrong thing to ask.
+            eventBannedOk = EventGuardService.AreAllEventsBannedForAct(state, titles);
+            int actEvents = 0;
+            try { actEvents = state?.Act?._rooms?.events?.Count ?? 0; } catch { }
+            W($"assert: the act's whole event list reads as blocked = {eventBannedOk} "
+              + $"({everyEvent.Count} ids blocked, act list holds {actEvents})");
+
+            if (state == null) W("no run state — event half SKIPPED");
+            else
+            {
+                var candidates = new HashSet<RoomType>
+                {
+                    RoomType.Monster, RoomType.Elite, RoomType.Treasure, RoomType.Shop, RoomType.Event,
+                };
+                var after = Hook.ModifyUnknownMapPointRoomTypes(state, candidates);
+                hookOk = !after.Contains(RoomType.Event) && after.Count > 0;
+                W($"assert: Event removed from '?' candidates = {hookOk} "
+                  + $"[{string.Join(", ", after.OrderBy(r => r))}]");
+
+                // A fresh odds table on its own Rng, so the run's stream is untouched. 30 rolls: the
+                // fallback is deterministic, but the odds loop is not, and one roll would prove little.
+                W($"(runs completed on this profile = {state.UnlockState.NumberOfRuns} — a first-ever run "
+                  + "forces two scripted '?' events before this hook, by design)");
+                var odds = new UnknownMapPointOdds(new Rng(9173u));
+                var rolled = new List<RoomType>();
+                for (int i = 0; i < 30; i++) rolled.Add(odds.Roll(Array.Empty<RoomType>(), state));
+                int events = rolled.Count(r => r == RoomType.Event);
+                int elites = rolled.Count(r => r == RoomType.Elite);
+                rollOk = events == 0 && elites == 0;
+                W($"assert: 30 '?' rolls produced no event and no elite = {rollOk} "
+                  + $"(event={events}, elite={elites}, "
+                  + $"[{string.Join(", ", rolled.GroupBy(r => r).Select(g => $"{g.Key}={g.Count()}"))}])");
+            }
+
+            // Is the shop-side patch even attached? "the guard didn't fire" and "the guard isn't there"
+            // look identical from the assertion, and only one of them is a code bug.
+            try
+            {
+                var patched = HarmonyLib.Harmony.GetAllPatchedMethods()
+                    .Where(m => m?.DeclaringType != null
+                                && (m.DeclaringType.Name.Contains("Merchant") || m.Name == "Initialize"))
+                    .Select(m => m.DeclaringType!.Name + "." + m.Name)
+                    .Distinct().OrderBy(x => x).ToList();
+                W($"harmony: merchant/Initialize patches attached = [{string.Join(", ", patched)}]");
+
+                // Process-wide list above proves nothing about OUR patch — dump the owners.
+                var target = HarmonyLib.AccessTools.Method(
+                    typeof(MegaCrit.Sts2.Core.Nodes.Screens.Shops.NMerchantInventory), "Initialize");
+                if (target == null) W("harmony: NMerchantInventory.Initialize did not resolve");
+                else
+                {
+                    var info = HarmonyLib.Harmony.GetPatchInfo(target);
+                    var owners = info?.Postfixes?.Select(pp => pp.owner) ?? Enumerable.Empty<string>();
+                    W($"harmony: resolved '{target.DeclaringType?.Name}.{target.Name}("
+                      + $"{string.Join(",", target.GetParameters().Select(pa => pa.ParameterType.Name))})', "
+                      + $"postfix owners = [{string.Join(", ", owners)}]");
+                }
+            }
+            catch (Exception e) { W("harmony patch dump failed: " + e.Message); }
+
+            Step("full ban: open a real shop, assert the potion slot NODES are gone");
+            try
+            {
+                await RunManager.Instance.EnterRoomDebug(RoomType.Shop);
+                await Task.Delay(2500);
+
+                var shop = Engine.GetMainLoop() is SceneTree t
+                    ? FindNode<MegaCrit.Sts2.Core.Nodes.Screens.Shops.NMerchantInventory>(t.Root)
+                    : null;
+                if (shop == null) { W("shop inventory node not found — node assert SKIPPED"); }
+                else
+                {
+                    // The shelves only render once the merchant screen is open. Open() throws at its
+                    // LAST statement in a debug-entered room — NMerchantDialogue._dialogueSet is null
+                    // because MerchantRoom never built a dialogue set on this path — but the open
+                    // animation is kicked off several lines earlier, so the inventory still renders.
+                    // Harness-only: nothing here is on a real player's path.
+                    try { shop.Open(); }
+                    catch (Exception oe) { W($"(Open() threw past the render step: {oe.GetType().Name} — debug-entered room has no merchant dialogue; harmless here)"); }
+                    await Task.Delay(1500);
+                    await Shot("14_shop_no_potions");
+
+                    var slots = shop.GetAllSlots().ToList();
+                    int potionSlots = slots.Count(sl => sl is MegaCrit.Sts2.Core.Nodes.Screens.Shops.NMerchantPotion);
+                    // ★The real assertion. An unfilled slot left in the tree has Entry == null, and
+                    // DefaultFocusedControl walks every slot doing s.Entry.IsStocked with no null check
+                    // — so "no slot without an entry" is exactly the crash this guard prevents.
+                    int nullEntry = slots.Count(sl => sl.Entry == null);
+                    slotNodesOk = potionSlots == 0 && nullEntry == 0;
+                    W($"assert: no potion slot nodes left and no slot without an entry = {slotNodesOk} "
+                      + $"({slots.Count} slot(s), {potionSlots} potion, {nullEntry} entry-less)");
+                }
+            }
+            catch (Exception e) { W($"assert: shop open/inspect THREW: {e}"); }
+        }
+        catch (Exception e) { W("full ban exception: " + e); }
+        finally
+        {
+            RestorePotionState(charTitle, ambientPotions);
+            foreach (var id in everyEvent) EventGuardService.SetEventAllowed(charTitle, id, true);
+            W("restored the player's own potion configuration and cleared the event blocks");
+        }
+
+        return bannedOk && batchOk && rewardOk && stripOk && shelfOk && relicOk
+               && eventBannedOk && hookOk && rollOk && slotNodesOk;
+    }
+
     /// <summary>
     /// Persistence round-trip for the new individual blocks: write, wipe at runtime, re-Load. The
     /// real settings file is snapshotted first and restored in the finally, so a test run never
@@ -671,38 +1180,54 @@ internal static class SoloTest
         string charTitle = player.Character?.CardPool?.Title ?? "ironclad";
         const string probeCard = "CARD.CG_PROBE_CARD";
         const string probeRelic = "RELIC.CG_PROBE_RELIC";
+        const string probePotion = "POTION.CG_PROBE_POTION";
+        const string probeEvent = "EVENT.CG_PROBE_EVENT";
         bool ok = false;
         try
         {
             CardGuardService.SetCardAllowed(charTitle, probeCard, false);
             RelicGuardService.SetRelicAllowed(charTitle, probeRelic, false);
+            PotionGuardService.SetPotionAllowed(charTitle, probePotion, false);
+            EventGuardService.SetEventAllowed(charTitle, probeEvent, false);
             CardGuardConfig.Save();
 
             string written = File.Exists(path) ? File.ReadAllText(path) : "";
             bool onDisk = written.Contains(probeCard, StringComparison.Ordinal)
                           && written.Contains(probeRelic, StringComparison.Ordinal)
+                          && written.Contains(probePotion, StringComparison.Ordinal)
+                          && written.Contains(probeEvent, StringComparison.Ordinal)
                           && written.Contains("\"cardBlock\"", StringComparison.Ordinal)
-                          && written.Contains("\"relicBlock\"", StringComparison.Ordinal);
-            W($"assert: probes written under cardBlock/relicBlock = {onDisk} ({written.Length} bytes)");
+                          && written.Contains("\"relicBlock\"", StringComparison.Ordinal)
+                          && written.Contains("\"potionBlock\"", StringComparison.Ordinal)
+                          && written.Contains("\"eventBlock\"", StringComparison.Ordinal);
+            W($"assert: probes written under card/relic/potion/event blocks = {onDisk} ({written.Length} bytes)");
 
             // Wipe at runtime, then re-Load — the file must put them back.
             CardGuardService.SetCardAllowed(charTitle, probeCard, true);
             RelicGuardService.SetRelicAllowed(charTitle, probeRelic, true);
+            PotionGuardService.SetPotionAllowed(charTitle, probePotion, true);
+            EventGuardService.SetEventAllowed(charTitle, probeEvent, true);
             bool cleared = CardGuardService.GetCardAllowed(charTitle, probeCard)
-                           && RelicGuardService.GetRelicAllowed(charTitle, probeRelic);
+                           && RelicGuardService.GetRelicAllowed(charTitle, probeRelic)
+                           && PotionGuardService.GetPotionAllowed(charTitle, probePotion)
+                           && EventGuardService.GetEventAllowed(charTitle, probeEvent);
 
             CardGuardConfig.Load();
             bool reCard = !CardGuardService.GetCardAllowed(charTitle, probeCard);
             bool reRelic = !RelicGuardService.GetRelicAllowed(charTitle, probeRelic);
+            bool rePotion = !PotionGuardService.GetPotionAllowed(charTitle, probePotion);
+            bool reEvent = !EventGuardService.GetEventAllowed(charTitle, probeEvent);
             W($"assert: cleared at runtime = {cleared}");
-            W($"assert: restored by Load = card {reCard}, relic {reRelic}");
-            ok = onDisk && cleared && reCard && reRelic;
+            W($"assert: restored by Load = card {reCard}, relic {reRelic}, potion {rePotion}, event {reEvent}");
+            ok = onDisk && cleared && reCard && reRelic && rePotion && reEvent;
         }
         catch (Exception e) { W($"config round-trip failed: {e.Message}"); ok = false; }
         finally
         {
             try { CardGuardService.SetCardAllowed(charTitle, probeCard, true); } catch { }
             try { RelicGuardService.SetRelicAllowed(charTitle, probeRelic, true); } catch { }
+            try { PotionGuardService.SetPotionAllowed(charTitle, probePotion, true); } catch { }
+            try { EventGuardService.SetEventAllowed(charTitle, probeEvent, true); } catch { }
             try
             {
                 if (backup != null) File.WriteAllText(path, backup);
@@ -741,6 +1266,8 @@ internal static class SoloTest
             var staged = new List<string>();
             var stagedCards = new List<string>();
             var stagedGlobal = new List<string>();
+            var stagedPotions = new List<string>();
+            var stagedEvents = new List<string>();
             try
             {
                 if (relicMod != null && RelicGuardService.GetModRelicPacks().TryGetValue(relicMod, out var rp))
@@ -813,6 +1340,64 @@ internal static class SoloTest
                     await Shot("9_panel_allscope_locked");
                     W($"all-characters scope shots taken (scope view + locked rows under '{charTitle}')");
                 }
+
+                // Potions and events. Both tabs introduce a pack row shape the older ones don't — a
+                // pool / act row with no flag of its own — so the tri-state glyph and the count suffix
+                // take a different path there and need their own shots. A couple of items are blocked
+                // first so a partial pack is actually visible.
+                var potionGroup = PotionGuardService.GetPotionGroups()
+                    .OrderByDescending(g => g.Potions.Count).FirstOrDefault();
+                if (potionGroup != null)
+                {
+                    foreach (var p in potionGroup.Potions.Take(2))
+                    {
+                        string id = PotionGuardService.PotionIdOf(p);
+                        if (id.Length == 0) continue;
+                        PotionGuardService.SetPotionAllowed(charTitle, id, false);
+                        stagedPotions.Add(id);
+                    }
+                    W($"staged {stagedPotions.Count} blocked potion(s) in pool '{potionGroup.Key}'");
+                    Ui.CardGuardPanel.TestSelect(charTitle);
+                    Ui.CardGuardPanel.TestOpen(tree.Root, 2, null, false);
+                    await Task.Delay(900);
+                    await Shot("10_panel_potions");
+                    Ui.CardGuardPanel.TestOpenPotionPool(tree.Root, potionGroup.Key);
+                    await Task.Delay(900);
+                    await Shot("11_panel_potion_detail");
+                    // Hover the first row: a potion name alone says nothing, so the panel shows the
+                    // game's own description. Reported as text too — a screenshot cannot tell an empty
+                    // description apart from one that failed to resolve.
+                    W("hover (potion): " + Ui.CardGuardPanel.TestHoverFirstRow());
+                    await Task.Delay(900);
+                    await Shot("15_potion_hover");
+                    Ui.CardGuardPanel.TestUnhover();
+                }
+                else W("no potion pools discovered — potion shots skipped");
+
+                var eventGroup = EventGuardService.GetEventGroups()
+                    .OrderByDescending(g => g.Events.Count).FirstOrDefault();
+                if (eventGroup != null)
+                {
+                    foreach (var e in eventGroup.Events.Take(2))
+                    {
+                        string id = EventGuardService.EventIdOf(e);
+                        if (id.Length == 0) continue;
+                        EventGuardService.SetEventAllowed(charTitle, id, false);
+                        stagedEvents.Add(id);
+                    }
+                    W($"staged {stagedEvents.Count} blocked event(s) in group '{eventGroup.Key}'");
+                    Ui.CardGuardPanel.TestOpen(tree.Root, 3, null, false);
+                    await Task.Delay(900);
+                    await Shot("12_panel_events");
+                    Ui.CardGuardPanel.TestOpenEventGroup(tree.Root, eventGroup.Key);
+                    await Task.Delay(900);
+                    await Shot("13_panel_event_detail");
+                    W("hover (event): " + Ui.CardGuardPanel.TestHoverFirstRow());
+                    await Task.Delay(900);
+                    await Shot("16_event_hover");
+                    Ui.CardGuardPanel.TestUnhover();
+                }
+                else W("no event groups discovered — event shots skipped");
             }
             finally
             {
@@ -822,6 +1407,10 @@ internal static class SoloTest
                     try { CardGuardService.SetCardAllowed(charTitle, id, true); } catch { }
                 foreach (var id in stagedGlobal)
                     try { CardGuardService.SetCardAllowed(CardGuardService.AllScope, id, true); } catch { }
+                foreach (var id in stagedPotions)
+                    try { PotionGuardService.SetPotionAllowed(charTitle, id, true); } catch { }
+                foreach (var id in stagedEvents)
+                    try { EventGuardService.SetEventAllowed(charTitle, id, true); } catch { }
                 Ui.CardGuardPanel.TestSelect(charTitle);
                 Ui.CardGuardPanel.TestClose();
             }

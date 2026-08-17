@@ -27,6 +27,12 @@ internal static class CardGuardConfig
         // configs written before per-item blocking existed — the empty default reads as "none".
         [JsonPropertyName("cardBlock")] public Dictionary<string, List<string>> CardBlock { get; set; } = new();
         [JsonPropertyName("relicBlock")] public Dictionary<string, List<string>> RelicBlock { get; set; } = new();
+        // Per-scope blocked potions / map events, and the mods that add them. Absent in configs
+        // written before the potion and event tabs existed — the empty default reads as "none".
+        [JsonPropertyName("potionModBlock")] public Dictionary<string, List<string>> PotionModBlock { get; set; } = new();
+        [JsonPropertyName("potionBlock")] public Dictionary<string, List<string>> PotionBlock { get; set; } = new();
+        [JsonPropertyName("eventModBlock")] public Dictionary<string, List<string>> EventModBlock { get; set; } = new();
+        [JsonPropertyName("eventBlock")] public Dictionary<string, List<string>> EventBlock { get; set; } = new();
     }
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
@@ -71,6 +77,22 @@ internal static class CardGuardConfig
                 foreach (var relicId in relicIds)
                     RelicGuardService.SetRelicAllowed(character, relicId, false);
 
+            foreach (var (scope, potionMods) in model.PotionModBlock)
+                foreach (var potionMod in potionMods)
+                    PotionGuardService.SetModAllowed(scope, potionMod, false);
+
+            foreach (var (scope, potionIds) in model.PotionBlock)
+                foreach (var potionId in potionIds)
+                    PotionGuardService.SetPotionAllowed(scope, potionId, false);
+
+            foreach (var (scope, eventMods) in model.EventModBlock)
+                foreach (var eventMod in eventMods)
+                    EventGuardService.SetModAllowed(scope, eventMod, false);
+
+            foreach (var (scope, eventIds) in model.EventBlock)
+                foreach (var eventId in eventIds)
+                    EventGuardService.SetEventAllowed(scope, eventId, false);
+
             Log.Info("config loaded.");
         }
         catch (Exception ex)
@@ -100,6 +122,20 @@ internal static class CardGuardConfig
                 if (relicMods.Count > 0) model.RelicModBlock[title] = relicMods;
                 var relics = RelicGuardService.GetBlockedRelics(title);
                 if (relics.Count > 0) model.RelicBlock[title] = relics;
+            }
+            foreach (var scope in PotionGuardService.GetConfiguredTitles())
+            {
+                var potionMods = PotionGuardService.GetBlockedMods(scope);
+                if (potionMods.Count > 0) model.PotionModBlock[scope] = potionMods;
+                var potions = PotionGuardService.GetBlockedPotions(scope);
+                if (potions.Count > 0) model.PotionBlock[scope] = potions;
+            }
+            foreach (var scope in EventGuardService.GetConfiguredTitles())
+            {
+                var eventMods = EventGuardService.GetBlockedMods(scope);
+                if (eventMods.Count > 0) model.EventModBlock[scope] = eventMods;
+                var events = EventGuardService.GetBlockedEvents(scope);
+                if (events.Count > 0) model.EventBlock[scope] = events;
             }
             File.WriteAllText(ConfigPath(), JsonSerializer.Serialize(model, JsonOpts));
         }

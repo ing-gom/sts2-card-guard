@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Reflection;
 using System.Linq;
 using HarmonyLib;
@@ -54,8 +54,17 @@ internal static class StartNewMultiplayerRun_Patch
 }
 
 /// <summary>
-/// Starting a singleplayer run clears any leftover multiplayer override so the local config takes
-/// over again (e.g. after finishing a co-op run and starting a solo one).
+/// Starting a singleplayer run clears the multiplayer state so the local config takes over again.
+///
+/// ★This is not only a "after a co-op run" tidy-up — it is what makes filtering work in singleplayer at
+/// all. Character select constructs a <c>StartRunLobby</c> even for a solo run (type=Singleplayer), and
+/// the ctor hook above sets every guard to pass-through as its fail-safe baseline. Without this reset the
+/// guards stay off for the whole solo run.
+///
+/// ★Goes through <see cref="MultiplayerSync.ClearAllMpState"/> rather than naming the services here.
+/// Naming them is precisely how potion and event filtering shipped broken in singleplayer: this line
+/// listed cards and relics only, so both new guards were left in pass-through and silently did nothing
+/// while every other test passed.
 /// </summary>
 [HarmonyPatch]
 internal static class StartNewSingleplayerRun_Patch
@@ -66,7 +75,8 @@ internal static class StartNewSingleplayerRun_Patch
 
     private static void Prefix()
     {
-        try { CardGuardService.ClearMpState(); RelicGuardService.ClearMpState(); }
+        try { MultiplayerSync.ClearAllMpState(); }
         catch (Exception ex) { Log.Warn($"StartNewSingleplayerRun hook failed: {ex.Message}"); }
     }
 }
+
