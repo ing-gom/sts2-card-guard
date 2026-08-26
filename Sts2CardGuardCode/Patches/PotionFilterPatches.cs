@@ -35,22 +35,29 @@ namespace Sts2CardGuard.Patches;
 /// block-set picks identically. Gated by the run's pass-through flag, so an unsynced networked run
 /// does nothing.
 ///
-/// ── What a starved pool does, measured rather than read ──────────────────────────────────────────
-/// Because the rarity is rolled first, a heavily blocked pool can leave the rolled rarity with nothing
-/// to draw. That does NOT crash: measured on 0.110 (the potion case in <c>SoloTest</c>), a draw asking
-/// for 3 potions from a pool holding exactly ONE Rare potion comes back with that one potion — a single
-/// entry, no nulls — so the game clamps to what is available.
+/// ── What a starved pool does ─────────────────────────────────────────────────────────────────────
+/// Because the rarity is rolled FIRST, a heavily blocked pool can leave the rolled rarity with nothing
+/// to draw. <c>Rng.NextItem</c> returns <c>default(T)</c> for an empty sequence and the factory adds it
+/// unconditionally, so the draw hands back NULLS — and vanilla's own consumers do not check:
+/// <c>MerchantInventory.PopulatePotionEntries</c> calls <c>item.ToMutable()</c> on each entry and
+/// throws <see cref="NullReferenceException"/>. <see cref="PotionFactory_StarvedDraw_Patch"/> is what
+/// keeps that from reaching them.
 ///
-/// ★Do not trust a decompile here. ilspycmd renders <c>CreateRandomPotion</c> as adding
-/// <c>Rng.NextItem</c>'s result unconditionally, which would return three entries with two nulls and
-/// crash every caller (<c>.ToMutable()</c> / <c>.First()</c>). A repair patch written against that
-/// reading lived in this file through 22 measured draws — including the deliberately starved one — and
-/// fired zero times, so it was deleted rather than shipped as a switch that does nothing.
+/// ★★This comment previously said the opposite — that the game "clamps to what is available, no
+/// nulls", measured on 0.110 — and a repair patch was deleted on the strength of it after firing zero
+/// times in 22 draws. That measurement was under-powered, not wrong-headed: the rarity roll is
+/// Common 65% / Uncommon 25% / Rare 10%, so when the surviving potion happens to be a COMMON one the
+/// draw almost always succeeds and the bug hides. It surfaced the moment a run left a single RARE
+/// potion allowed — 20 of 20 single draws came back null (measured on v0.111.0). Both game builds
+/// decompile identically here, so this was never branch-specific; it was a sampling artefact.
+/// **A conclusion labelled "measured" is still only as good as the sample behind it.**
 ///
-/// The case that IS fatal is a pool filtered to EMPTY: <c>CreateRandomPotionOutOfCombat</c> calls
-/// <c>.First()</c> on an empty list and throws. That is what the panel's "at least one potion has to
-/// stay allowed" floor is for (<c>PotionGuardService.AnyPotionAllowedFor</c>), and the self-test
-/// asserts the throw so the floor can never be dropped later as apparently unnecessary.
+/// The case that stays fatal on purpose is a pool filtered to EMPTY: <c>CreateRandomPotionOutOfCombat</c>
+/// calls <c>.First()</c> on an empty list and throws. That is what the panel's "at least one potion has
+/// to stay allowed" floor is for (<c>PotionGuardService.AnyPotionAllowedFor</c>), and the self-test
+/// asserts the throw so the floor can never be dropped later as apparently unnecessary. The repair
+/// below deliberately does not paper over it: with nothing allowed there is nothing to substitute, so
+/// the result stays empty and the floor keeps doing its job.
 ///
 /// Visible consequence, by design: block enough potions and a merchant that would have stocked three
 /// may stock fewer. Fewer potions is the honest result of blocking potions; handing a blocked one back
@@ -106,5 +113,122 @@ internal static class PotionPoolModel_GetUnlockedPotions_Patch
             __result = PotionGuardService.FilterPool(__instance, __result);
         }
         catch (Exception ex) { Log.Warn($"potion pool filter error: {ex.Message}"); }
+    }
+}
+
+/// <summary>
+/// Keeps a null out of a starved draw, so a thinned pool yields FEWER potions rather than broken ones.
+///
+/// The rarity is rolled before the pick, so blocking enough potions leaves some rolls with no
+/// candidate of that rarity; the factory then adds <c>Rng.NextItem</c>'s <c>null</c> to the list and
+/// vanilla's consumers dereference it (see the type remarks above). This substitutes the first
+/// still-unused allowed potion for each null, and drops the entry when there is none left.
+///
+/// ★RNG-neutral, like the filter itself. The substitute is chosen by pool order, NOT by asking
+/// <c>rng</c> again: an extra draw would shift every later roll in the run, and this file's whole
+/// contract with co-op is that filtering leaves the RNG stream where vanilla left it. The cost is that
+/// a starved pool substitutes predictably instead of randomly — for a pool thin enough to starve a
+/// rarity that is a handful of candidates anyway, and a repeatable potion beats a crash.
+///
+/// ★Patched on the PRIVATE draw both public entry points funnel through, so the in-combat path
+/// (<c>CreateRandomPotionInCombat</c>, which calls <c>.First()</c> on the result) is covered by the
+/// same fix. That method is named <c>CreateRandomPotions</c> on public-beta v0.111.0 and
+/// <c>CreateRandomPotion</c> on public v0.107.1, and its return type differs too — so it is resolved
+/// by hand rather than named in an attribute. ★A private rename like that is the silent kind of
+/// break: an attribute patch on the old name compiles, throws nothing, and simply never attaches.
+///
+/// Gated on <c>IsPassThrough</c>: if this run is not filtering, the pool is vanilla-complete, there is
+/// nothing to repair, and nothing here should alter what the game would have produced.
+/// </summary>
+internal static class PotionFactory_StarvedDraw_Patch
+{
+    private static readonly Type[] Signature =
+        { typeof(IEnumerable<PotionModel>), typeof(int), typeof(MegaCrit.Sts2.Core.Random.Rng) };
+
+    /// <summary>Attaches the postfix whose <c>__result</c> matches this build's return type.</summary>
+    internal static void Apply(Harmony harmony)
+    {
+        try
+        {
+            MethodInfo? original = null;
+            foreach (string name in new[] { "CreateRandomPotions", "CreateRandomPotion" })
+            {
+                original = typeof(PotionFactory).GetMethod(
+                    name, BindingFlags.NonPublic | BindingFlags.Static, null, Signature, null);
+                if (original != null) break;
+            }
+
+            if (original == null)
+            {
+                Log.Warn("PotionFactory's private draw was not found under any known name — "
+                         + "a heavily blocked potion pool may hand nulls to the shop.");
+                return;
+            }
+
+            string post = original.ReturnType == typeof(List<PotionModel>)
+                ? nameof(PostfixList)          // public v0.107.1 and earlier
+                : nameof(PostfixEnumerable);   // public-beta v0.111.0 and later
+
+            harmony.Patch(original, postfix: new HarmonyMethod(
+                AccessTools.Method(typeof(PotionFactory_StarvedDraw_Patch), post)));
+            Log.Info($"starved-draw repair bound to {original.Name} via {post} "
+                     + $"(returns {original.ReturnType.Name}).");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"could not attach the starved-draw repair: {ex.Message}");
+        }
+    }
+
+    private static void PostfixEnumerable(IEnumerable<PotionModel> options, ref IEnumerable<PotionModel> __result)
+    {
+        List<PotionModel>? fixedUp = Repair(options, __result);
+        if (fixedUp != null) __result = fixedUp;
+    }
+
+    private static void PostfixList(IEnumerable<PotionModel> options, ref List<PotionModel> __result)
+    {
+        List<PotionModel>? fixedUp = Repair(options, __result);
+        if (fixedUp != null) __result = fixedUp;
+    }
+
+    /// <returns>A null-free draw, or null when there was nothing to change.</returns>
+    private static List<PotionModel>? Repair(IEnumerable<PotionModel>? options, IEnumerable<PotionModel>? drawn)
+    {
+        try
+        {
+            if (PotionGuardService.IsPassThrough || drawn == null) return null;
+
+            var entries = drawn.ToList();
+            int holes = entries.Count(p => p == null);
+            if (holes == 0) return null;
+
+            // Pool order is the substitute's only source of randomness — see the type remarks.
+            var pool = options?.Where(p => p != null).ToList() ?? new List<PotionModel>();
+            var used = new HashSet<PotionModel>(entries.Where(p => p != null));
+
+            var repaired = new List<PotionModel>(entries.Count);
+            int filled = 0;
+            foreach (PotionModel entry in entries)
+            {
+                if (entry != null) { repaired.Add(entry); continue; }
+
+                PotionModel? substitute = pool.FirstOrDefault(p => !used.Contains(p));
+                if (substitute == null) continue;   // nothing allowed is left: one fewer potion
+                used.Add(substitute);
+                repaired.Add(substitute);
+                filled++;
+            }
+
+            Log.Info($"starved potion draw: {holes} empty rarity roll(s) — "
+                     + $"substituted {filled}, dropped {holes - filled} "
+                     + $"(asked {entries.Count}, returning {repaired.Count}).");
+            return repaired;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"starved-draw repair error: {ex.Message}");
+            return null;
+        }
     }
 }

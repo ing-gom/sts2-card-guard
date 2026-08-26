@@ -37,6 +37,13 @@ public partial class MainFile : Node
 
             var harmony = new Harmony(ModId);
             harmony.PatchAll(typeof(MainFile).Assembly);
+
+            // One target's return type differs between game branches, so its __result cannot be
+            // spelled in an attribute — see PotionFactory_CreateRandomPotions_FullBan_Patch. Applied
+            // after PatchAll so a failure here cannot take the attribute-driven patches with it.
+            Patches.PotionFactory_CreateRandomPotions_FullBan_Patch.Apply(harmony);
+            Patches.PotionFactory_StarvedDraw_Patch.Apply(harmony);
+
             Logger.Info($"[{ModId}] Harmony patches applied.");
 
             // Register UI strings for the current language now; the SetLanguage patch re-applies on change.

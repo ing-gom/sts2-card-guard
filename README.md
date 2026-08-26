@@ -173,6 +173,28 @@ identically and stay in sync. The host's config is exchanged in the lobby before
 - Your saved settings are untouched; the host-follow behavior only applies inside a co-op run.
 - Singleplayer is unaffected (uses your own settings as before).
 
+## Game-branch compatibility
+
+One Workshop item ships one payload, so the same DLL serves players on `public` and on
+`public-beta`. Two of the Harmony patches are therefore attached by hand from `MainFile` instead of
+by attribute, because the shape they target is not the same on both builds:
+
+- `PotionFactory.CreateRandomPotionsOutOfCombat` returns `List<PotionModel>` on public v0.107.1 and
+  `IEnumerable<PotionModel>` on public-beta v0.111.0.
+- the private draw both potion entry points funnel through is named `CreateRandomPotion` on the
+  former and `CreateRandomPotions` on the latter, and its return type differs the same way.
+
+> This matters more than it looks. Harmony binds `__result` to the original's return type, so a
+> mismatch makes `harmony.Patch` **throw while patching** — and one throw aborts the whole
+> `PatchAll`, so initialization never finishes and *every* feature of the mod stays off. That is
+> exactly what happened on v0.111.0. The hand-applied patches run after `PatchAll` so a future
+> failure there degrades to a log line instead of taking the rest down with it.
+
+> A Harmony target is named by `typeof` + `nameof`, so no member reference to it exists in this
+> assembly. Diffing member references against both game builds — which is worth doing, and finds
+> the other class of break — cannot see this one at all. It only shows up by starting the game and
+> reading the init log.
+
 ## Scope / limitations
 
 - **System cards** (curse/status/token/event/quest — Wound, Burn, etc.) are never blocked.

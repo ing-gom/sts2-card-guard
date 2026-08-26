@@ -1,4 +1,4 @@
-// solo-verify — single-player self-test for the relic-pack filter (v0.4.0).
+﻿// solo-verify — single-player self-test for the relic-pack filter (v0.4.0).
 //
 // Drop `selftest.sp.flag` next to the mod DLL and launch one instance (solo-selftest.ps1). This
 // auto-starts a single-player run (no save), then exercises the grab-bag relic filter directly:
@@ -729,7 +729,7 @@ internal static class SoloTest
         foreach (var (id, _) in ambient) PotionGuardService.SetPotionAllowed(charTitle, id, true);
 
         List<PotionModel> baseline;
-        try { baseline = PotionFactory.GetPotionOptions(player, none).Where(p => p != null).Distinct().ToList(); }
+        try { baseline = TestApiCompat.PotionOptions(player).Where(p => p != null).Distinct().ToList(); }
         catch (Exception e) { W($"assert: GetPotionOptions THREW: {e.Message}"); return false; }
         W($"baseline potion options: {baseline.Count}");
         if (baseline.Count < 2) { W("assert: fewer than 2 potions available — cannot tell blocking from emptiness. SKIP."); return true; }
@@ -741,7 +741,7 @@ internal static class SoloTest
         Step("potion: block ONE potion");
         PotionGuardService.SetPotionAllowed(charTitle, victimId, false);
         List<PotionModel> filtered;
-        try { filtered = PotionFactory.GetPotionOptions(player, none).Where(p => p != null).Distinct().ToList(); }
+        try { filtered = TestApiCompat.PotionOptions(player).Where(p => p != null).Distinct().ToList(); }
         catch (Exception e) { W($"assert: GetPotionOptions THREW after block: {e.Message}"); PotionGuardService.SetPotionAllowed(charTitle, victimId, true); return false; }
 
         bool victimGone = !filtered.Any(p => PotionGuardService.PotionIdOf(p) == victimId);
@@ -775,7 +775,7 @@ internal static class SoloTest
             // The merchant's 3-in-one-call. How MANY it returns when the pool is that thin is the
             // game's business (measured: it clamps to 1) — what must hold is no nulls and nothing
             // blocked, so that is what is asserted and the count is only reported.
-            var batch = PotionFactory.CreateRandomPotionsOutOfCombat(player, 3, player.PlayerRng.Shops);
+            var batch = TestApiCompat.RandomPotionsOutOfCombat(player, 3, player.PlayerRng.Shops);
             int batchNulls = batch.Count(p => p == null);
             int batchWrong = batch.Count(p => p != null && PotionGuardService.PotionIdOf(p) != survivorId);
             W($"assert: 3-draw -> {batch.Count} entr(ies), {batchNulls} null, {batchWrong} not the survivor "
@@ -894,7 +894,7 @@ internal static class SoloTest
         var offered = new List<PotionModel>();
         try
         {
-            offered = PotionFactory.GetPotionOptions(player, Array.Empty<PotionModel>())
+            offered = TestApiCompat.PotionOptions(player)
                 .Where(p => p != null).Distinct().ToList();
         }
         catch (Exception e) { W($"GetPotionOptions failed: {e.Message} — SKIP."); RestorePotionState(charTitle, ambient); return true; }
@@ -919,7 +919,7 @@ internal static class SoloTest
             W($"blocked {blocked.Count} of {ordered.Count} potion(s) for '{charTitle}' (partial, not a full ban); "
               + $"fullyBanned={PotionGuardService.IsFullyBannedFor(player)}");
 
-            var stillOffered = PotionFactory.GetPotionOptions(player, Array.Empty<PotionModel>())
+            var stillOffered = TestApiCompat.PotionOptions(player)
                 .Where(p => p != null).Select(PotionGuardService.PotionIdOf).ToList();
             int leaked = stillOffered.Count(id => blocked.Contains(id));
             optionsOk = leaked == 0 && stillOffered.Count > 0;
@@ -996,7 +996,7 @@ internal static class SoloTest
             Step("full ban: batch draw returns nothing rather than throwing");
             try
             {
-                var batch = PotionFactory.CreateRandomPotionsOutOfCombat(player, 3, player.PlayerRng.Shops);
+                var batch = TestApiCompat.RandomPotionsOutOfCombat(player, 3, player.PlayerRng.Shops);
                 batchOk = batch.Count == 0;
                 W($"assert: 3-potion batch draw is empty = {batchOk} ({batch.Count} returned)");
             }
@@ -2103,5 +2103,84 @@ internal static class SoloTest
         _selectorScope = null;
         _out.Insert(0, (ok ? "RESULT: OK\n" : "RESULT: FAIL\n"));
         try { File.WriteAllText(Path.Combine(ModDir(), "selftest.sp.txt"), _out.ToString()); } catch { }
+    }
+}
+
+/// <summary>
+/// The two <c>PotionFactory</c> entry points the batteries use whose shape differs between game
+/// branches. Test-only: this file is compiled out of Release, so nothing here reaches players.
+///
+/// ★Why reflection rather than just fixing the call sites: without it the harness compiles against
+/// exactly one branch and the dev box has to stay there. Both of these changed in v0.111.0 —
+///   <c>GetPotionOptions(Player, IEnumerable&lt;PotionModel&gt;)</c> → <c>GetPotionOptions(Player)</c>
+///     (the blacklist parameter was dropped; every call site here passed an empty one anyway)
+///   <c>CreateRandomPotionsOutOfCombat(...)</c> return <c>List&lt;PotionModel&gt;</c> → <c>IEnumerable&lt;PotionModel&gt;</c>
+///     (a RETURN-TYPE-only change — it broke `batch.Count` at compile time here, but on a shipped
+///      DLL that same change is the silent kind that only throws when the caller is JITted)
+///
+/// Both helpers materialise to a <see cref="List{T}"/> so callers keep <c>.Count</c> and can
+/// enumerate more than once. Entries may be null — a blocked potion comes back as one.
+/// </summary>
+internal static class TestApiCompat
+{
+    private static MethodInfo? _options;
+    private static int _optionsArity;
+    private static MethodInfo? _batch;
+
+    private static MethodInfo Options()
+    {
+        if (_options != null) return _options;
+
+        Type t = typeof(PotionFactory);
+        foreach (MethodInfo m in t.GetMethods(BindingFlags.Public | BindingFlags.Static))
+        {
+            if (m.Name != "GetPotionOptions") continue;
+            ParameterInfo[] ps = m.GetParameters();
+            if (ps.Length is 1 or 2 && ps[0].ParameterType == typeof(Player))
+            {
+                _options = m;
+                _optionsArity = ps.Length;
+                return m;
+            }
+        }
+        throw new MissingMethodException("PotionFactory.GetPotionOptions(Player[, blacklist]) not found");
+    }
+
+    /// <summary>Every potion this player could be offered, before Card Guard's filtering is judged.</summary>
+    public static List<PotionModel> PotionOptions(Player player)
+    {
+        MethodInfo m = Options();
+        object?[] args = _optionsArity == 1
+            ? new object?[] { player }
+            : new object?[] { player, Array.Empty<PotionModel>() };
+        return Materialise(m.Invoke(null, args));
+    }
+
+    /// <summary>The merchant's n-in-one-call draw. <paramref name="count"/> is a request, not a promise —
+    /// a thin pool clamps it.</summary>
+    public static List<PotionModel> RandomPotionsOutOfCombat(Player player, int count, Rng rng)
+    {
+        if (_batch == null)
+        {
+            _batch = typeof(PotionFactory).GetMethod(
+                         "CreateRandomPotionsOutOfCombat",
+                         BindingFlags.Public | BindingFlags.Static)
+                     ?? throw new MissingMethodException("PotionFactory.CreateRandomPotionsOutOfCombat not found");
+        }
+
+        // The blacklist parameter is optional on both branches and null means "none"; reflection
+        // does not apply defaults, so pass it explicitly.
+        int arity = _batch.GetParameters().Length;
+        object?[] args = arity >= 4
+            ? new object?[] { player, count, rng, null }
+            : new object?[] { player, count, rng };
+        return Materialise(_batch.Invoke(null, args));
+    }
+
+    private static List<PotionModel> Materialise(object? result)
+    {
+        if (result is List<PotionModel> already) return already;
+        if (result is IEnumerable<PotionModel> seq) return seq.ToList();
+        return new List<PotionModel>();
     }
 }

@@ -160,6 +160,27 @@ STS2 협동은 호스트 권위 락스텝입니다 — 모든 피어가 호스�
 - 저장된 설정은 그대로입니다. 호스트-따르기 동작은 협동 런 안에서만 적용됩니다.
 - 싱글플레이어는 영향받지 않습니다(기존처럼 자신의 설정 사용).
 
+## 게임 브랜치 호환
+
+창작마당 아이템은 페이로드가 하나라, `public` 과 `public-beta` 사용자가 같은 DLL 을 받습니다.
+그래서 Harmony 패치 두 개는 속성 대신 `MainFile` 에서 직접 붙입니다 — 대상의 모양이 두 빌드에서
+다르기 때문입니다.
+
+- `PotionFactory.CreateRandomPotionsOutOfCombat` 의 반환형이 public v0.107.1 에서는
+  `List<PotionModel>`, public-beta v0.111.0 에서는 `IEnumerable<PotionModel>` 입니다.
+- 두 포션 진입점이 공통으로 지나가는 private 드로우 메서드는 전자에서 `CreateRandomPotion`,
+  후자에서 `CreateRandomPotions` 이고 반환형도 같은 식으로 다릅니다.
+
+> 보기보다 중요한 문제입니다. Harmony 는 `__result` 를 원본의 반환형에 바인딩하므로, 형이 맞지
+> 않으면 `harmony.Patch` 가 **패치 시점에 예외를 던집니다**. 하나만 던져도 `PatchAll` 이 통째로
+> 중단되어 초기화가 끝나지 않고, 결과적으로 모드의 *모든* 기능이 꺼집니다. v0.111.0 에서 실제로
+> 그렇게 됐습니다. 직접 붙이는 패치는 `PatchAll` 뒤에 두어, 나중에 또 실패해도 나머지를 끌고
+> 내려가지 않고 로그 한 줄로 끝나게 했습니다.
+
+> Harmony 대상은 `typeof` + `nameof` 로 지명하므로 이 어셈블리에는 해당 멤버의 참조가 존재하지
+> 않습니다. 두 게임 빌드에 멤버 참조를 대조하는 검사는 (해볼 가치가 있고 다른 부류의 파손은
+> 잡아내지만) 이 부류는 아예 볼 수 없습니다. 게임을 실제로 띄워 init 로그를 읽어야만 드러납니다.
+
 ## 범위 / 한계
 
 - **시스템 카드**(curse/status/token/event/quest — Wound, Burn 등)는 절대 차단하지 않습니다.

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using Godot;
 using HarmonyLib;
@@ -49,19 +50,67 @@ namespace Sts2CardGuard.Patches;
 /// The original is skipped, so its RNG draws are not made. That shifts the rest of the run's
 /// <c>Shops</c> / <c>CombatPotionGeneration</c> streams away from vanilla — deliberately, and
 /// identically on every peer, which is the only property co-op needs.
+///
+/// ★NOT attribute-patched — applied by hand from <c>MainFile</c> via <see cref="Apply"/>.
+///
+/// Harmony binds <c>__result</c> to the ORIGINAL method's return type, and v0.111.0 changed this one
+/// from <c>List&lt;PotionModel&gt;</c> to <c>IEnumerable&lt;PotionModel&gt;</c>. A mismatch is not a
+/// quiet no-op: Harmony throws while patching, that takes down the whole <c>PatchAll</c> call, and
+/// <c>MainFile.Initialize</c> never finishes — so ONE drifted return type killed every feature of the
+/// mod on public-beta ("init failed: Patching exception in method ... CreateRandomPotionsOutOfCombat",
+/// measured on v0.111.0). No attribute can express "either of two return types", hence the runtime
+/// choice in <see cref="Apply"/>.
+///
+/// ★This class of break is invisible to metadata diffing: a Harmony target is named by
+/// <c>typeof</c> + <c>nameof</c>, so no member reference to it exists in the mod's IL for a MemberRef
+/// scan to resolve. It only shows up by patching against the real build.
 /// </summary>
-[HarmonyPatch(typeof(PotionFactory), nameof(PotionFactory.CreateRandomPotionsOutOfCombat))]
 internal static class PotionFactory_CreateRandomPotions_FullBan_Patch
 {
-    private static bool Prefix(Player player, ref List<PotionModel> __result)
+    /// <summary>Applies the prefix whose <c>__result</c> matches this build's return type.</summary>
+    internal static void Apply(Harmony harmony)
     {
-        try
+        MethodInfo? original = AccessTools.Method(
+            typeof(PotionFactory), nameof(PotionFactory.CreateRandomPotionsOutOfCombat));
+        if (original == null)
         {
-            if (!PotionGuardService.IsFullyBannedFor(player)) return true;
-            __result = new List<PotionModel>();
-            return false;
+            Log.Warn("PotionFactory.CreateRandomPotionsOutOfCombat not found — "
+                     + "a full potion ban may throw when something asks for a batch of potions.");
+            return;
         }
-        catch (Exception ex) { Log.Warn($"potion batch full-ban guard error: {ex.Message}"); return true; }
+
+        string prefix = original.ReturnType == typeof(List<PotionModel>)
+            ? nameof(PrefixList)          // public v0.107.1 and earlier
+            : nameof(PrefixEnumerable);   // public-beta v0.111.0 and later
+
+        harmony.Patch(original, prefix: new HarmonyMethod(
+            AccessTools.Method(typeof(PotionFactory_CreateRandomPotions_FullBan_Patch), prefix)));
+        Log.Info($"potion batch full-ban guard bound via {prefix} "
+                 + $"(returns {original.ReturnType.Name}).");
+    }
+
+    private static bool PrefixList(Player player, ref List<PotionModel> __result)
+    {
+        if (!Suppress(player)) return true;
+        __result = new List<PotionModel>();
+        return false;
+    }
+
+    private static bool PrefixEnumerable(Player player, ref IEnumerable<PotionModel> __result)
+    {
+        if (!Suppress(player)) return true;
+        __result = Array.Empty<PotionModel>();
+        return false;
+    }
+
+    private static bool Suppress(Player player)
+    {
+        try { return PotionGuardService.IsFullyBannedFor(player); }
+        catch (Exception ex)
+        {
+            Log.Warn($"potion batch full-ban guard error: {ex.Message}");
+            return false;   // let the original run
+        }
     }
 }
 

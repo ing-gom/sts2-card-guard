@@ -1,4 +1,4 @@
-// coop-verify — 2-instance co-op self-test for the relic-pack filter (v0.4.0).
+﻿// coop-verify — 2-instance co-op self-test for the relic-pack filter (v0.4.0).
 //
 // Drop `selftest.coop.flag` next to the mod DLL and launch two instances (coop-selftest.ps1). The
 // HOST blocks a relic-adding mod FOR its character BEFORE the lobby, so that block rides the normal
@@ -313,7 +313,7 @@ internal static class CoopTest
                 foreach (var pl in players.OrderBy(x => x.NetId))
                 {
                     IEnumerable<PotionModel> opts;
-                    try { opts = MegaCrit.Sts2.Core.Factories.PotionFactory.GetPotionOptions(pl, Array.Empty<PotionModel>()); }
+                    try { opts = TestApiCompat.PotionOptions(pl); }
                     catch { continue; }
                     foreach (var pot in opts)
                     {

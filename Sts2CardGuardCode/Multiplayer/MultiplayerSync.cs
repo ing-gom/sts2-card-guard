@@ -1,6 +1,8 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Multiplayer.Game.Lobby;
 
@@ -382,12 +384,75 @@ internal static class MultiplayerSync
     {
         if (net is INetHostGameService host)
         {
+            IEnumerable? peers = ConnectedPeersOf(host);
+
+            // ★Fail CLOSED. Returning true here means "every peer acked" and switches filtering ON,
+            // which is precisely the desync this method exists to prevent. If the peer list cannot
+            // be read at all, the only safe answer is "not all acked".
+            if (peers == null) return false;
+
             lock (_gate)
             {
-                foreach (var peer in host.ConnectedPeers)
+                foreach (NetClientData peer in peers)
                     if (!_ackedPeers.Contains(peer.peerId)) return false;
             }
         }
         return true; // no peers (host alone) → nothing to desync
+    }
+
+    private static PropertyInfo? _peersProp;
+    private static Type? _peersPropOwner;
+    private static bool _peersPropWarned;
+
+    /// <summary>
+    /// The host's connected-peer list, wherever this game build keeps it.
+    ///
+    /// ★v0.111.0 moved <c>ConnectedPeers</c> OFF the <see cref="INetHostGameService"/> interface and
+    /// onto the concrete <c>NetHostGameService</c>, changing the return type from
+    /// <c>IReadOnlyList&lt;NetClientData&gt;</c> to <c>List&lt;NetClientData&gt;</c> on the way.
+    /// Either change on its own invalidates a compiled member reference, so the DLL shipped to
+    /// public (v0.107.1) users throws <see cref="MissingMethodException"/> the moment this method is
+    /// JITted on public-beta.
+    ///
+    /// It did not look like a crash: the throw is caught by <see cref="LockInForRun"/>'s handler,
+    /// which disables filtering "to stay safe" — so on beta a HOST silently played whole co-op runs
+    /// with Card Guard doing nothing, with only a log line to say so. Single-player and clients were
+    /// never affected (neither reaches this method).
+    ///
+    /// ★Read off the RUNTIME type, not a version branch: the concrete service declares the property
+    /// on both branches, so one reflective lookup covers both. Cached per owning type — the lookup
+    /// happens once per run at lock-in, but the cache also keeps the log quiet.
+    /// </summary>
+    /// <returns>The peer list as a bare sequence, or null when this build exposes no such property.
+    /// </returns>
+    private static IEnumerable? ConnectedPeersOf(INetHostGameService host)
+    {
+        Type owner = host.GetType();
+        if (!ReferenceEquals(owner, _peersPropOwner))
+        {
+            _peersPropOwner = owner;
+            _peersProp = owner.GetProperty("ConnectedPeers", BindingFlags.Public | BindingFlags.Instance);
+        }
+
+        if (_peersProp == null)
+        {
+            if (!_peersPropWarned)
+            {
+                _peersPropWarned = true;
+                Log.Warn($"{owner.Name} exposes no ConnectedPeers on this game build → " +
+                         "cannot confirm peers acked; filtering stays OFF in co-op.");
+            }
+            return null;
+        }
+
+        try
+        {
+            return _peersProp.GetValue(host) as IEnumerable;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"reading ConnectedPeers threw ({ex.Message}) → treating peers as not acked.");
+            return null;
+        }
     }
 }
